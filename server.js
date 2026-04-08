@@ -208,6 +208,31 @@ function clearAuthCookie(res) {
   res.setHeader('Set-Cookie', `${AUTH_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`);
 }
 
+const rateLimit = require('express-rate-limit');
+
+function getClientIp(req) {
+  const fw = req.headers['x-forwarded-for'];
+  if (fw) return String(fw.split(',')[0]).trim();
+  return req.socket.remoteAddress || req.ip || 'unknown';
+}
+
+// Rate limiter: block an IP after 5 failed login attempts within 15 minutes
+// Each failed password check also increments the counter via the handler below
+const loginRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // 5 attempts per window
+  keyGenerator: (req) => getClientIp(req),
+  handler: (req, res) => {
+    log('auth.rate_limited', `ip ${getClientIp(req)}`);
+    res.status(429).json({
+      ok: false,
+      error: 'too many failed attempts, try again in 15 minutes',
+    });
+  },
+  standardHeaders: true, // Return rate limit info in `RateLimit-*` headers
+  legacyHeaders: false,
+});
+
 function formatBytes(bytes) {
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
   let idx = 0;
@@ -816,10 +841,11 @@ app.get('/api/session', (req, res) => {
   res.json({ authenticated: isAuthed(req), passwordRequired: true, identity: 'root@hermes' });
 });
 
-app.post('/api/login', (req, res) => {
+app.post('/api/login', loginRateLimiter, (req, res) => {
+  const ip = getClientIp(req);
   const password = String(req.body?.password || '');
   if (password !== CONTROL_PASSWORD) {
-    log('auth.failed', 'bad password attempt');
+    log('auth.failed', `bad password from ip ${ip}`);
     return res.status(401).json({ ok: false, error: 'bad password' });
   }
   setAuthCookie(res);

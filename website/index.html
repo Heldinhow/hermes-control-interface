@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hermes Control Interface</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css" />
+  <link rel="stylesheet" href="/vendor/xterm/css/xterm.css" />
+</head>
+<body>
+  <div id="login-overlay" class="overlay hidden">
+    <div class="login-card">
+      <div class="login-title">Hermes Control Interface</div>
+      <div class="login-sub">root / hermes login required</div>
+      <form id="login-form" class="login-form">
+        <input id="password-input" type="password" placeholder="Password" autocomplete="current-password" />
+        <button type="submit" class="primary-btn">unlock</button>
+      </form>
+      <div id="login-error" class="login-error"></div>
+    </div>
+  </div>
+
+  <div id="bg-grid"></div>
+
+  <header id="topbar">
+    <div class="topbar-left">
+      <div class="brand">Hermes Control Interface</div>
+      <div class="subtitle">embedded Hermes CLI • root@hermes</div>
+    </div>
+    <div class="topbar-center">
+      <span class="pill" id="status-pill">LOCKED</span>
+      <span class="pill" id="model-pill">model…</span>
+      <span class="pill" id="state-pill">state…</span>
+    </div>
+    <div class="topbar-right">
+      <span id="clock">--:--:--</span>
+      <button class="ghost-btn" id="refresh-btn">refresh</button>
+      <button class="ghost-btn" id="layout-edit-btn">edit layout</button>
+      <button class="ghost-btn" id="layout-save-btn" disabled>save layout</button>
+      <button class="ghost-btn" id="logout-btn">logout</button>
+    </div>
+  </header>
+
+  <div id="shell" class="locked">
+    <aside id="sidebar">
+      <section class="side-section">
+        <div class="side-title">Projects</div>
+        <div id="projects-list" class="list"></div>
+      </section>
+      <section class="side-section">
+        <div class="side-title">Sessions</div>
+        <div id="sessions-list" class="list"></div>
+      </section>
+      <section class="side-section">
+        <div class="side-title">Quick actions</div>
+        <div id="quick-actions" class="quick-actions"></div>
+      </section>
+      <section class="side-section footer-note">
+        <div class="side-title">Signal</div>
+        <div class="small-meta">live bus: <span id="bus-state">locked</span><br>ws path: /ws<br>fallback: polling every 5s</div>
+      </section>
+    </aside>
+
+    <main id="main">
+      <div id="workspace">
+        <article class="panel terminal-panel" data-panel-id="terminal" data-x="0" data-y="0" data-w="38" data-h="44">
+          <div class="panel-head drag-handle">
+            <span>EMBEDDED HERMES CLI</span>
+            <div class="panel-head-right">
+              <span class="mini-dot green"></span>
+              <span class="mini-label" id="terminal-label">root@hermes</span>
+              <button id="terminal-fullscreen-btn" class="ghost-btn panel-action" type="button">fullscreen</button>
+            </div>
+          </div>
+          <div class="panel-body terminal-body">
+            <div class="terminal-banner">
+              <div class="terminal-badge">root@hermes</div>
+              <div class="terminal-path">project root</div>
+              <div class="terminal-hint">type <span>hermes</span> or any shell command</div>
+            </div>
+            <div id="terminal-output" class="terminal-output"></div>
+            <form id="terminal-form" class="terminal-form">
+              <span id="terminal-prompt" class="prompt">root@hermes:project-root#</span>
+              <input id="terminal-input" autocomplete="off" spellcheck="false" placeholder="hermes status" />
+              <button class="ghost-btn submit-btn" type="submit">run</button>
+            </form>
+          </div>
+          <div class="resize-handle"></div>
+        </article>
+
+        <article class="panel explorer-panel" data-panel-id="explorer" data-x="39" data-y="0" data-w="61" data-h="44">
+          <div class="panel-head drag-handle">
+            <span>FILE EXPLORER + EDITOR</span>
+            <div class="panel-head-right">
+              <span class="mini-dot amber"></span>
+              <span class="mini-label" id="file-status">idle</span>
+            </div>
+          </div>
+          <div class="panel-body explorer-body">
+            <div id="explorer-roots" class="explorer-roots"></div>
+            <div class="editor-shell">
+              <div class="editor-toolbar">
+                <div>
+                  <div id="editor-path" class="editor-path">Select a file</div>
+                  <div id="editor-meta" class="editor-meta">read / edit / save</div>
+                </div>
+                <div class="editor-actions">
+                  <button id="save-file-btn" class="ghost-btn" type="button">save</button>
+                </div>
+              </div>
+              <textarea id="file-editor" class="file-editor" spellcheck="false" placeholder="Pick a file from the explorer"></textarea>
+            </div>
+          </div>
+          <div class="resize-handle"></div>
+        </article>
+
+        <article class="panel stat-panel" data-panel-id="system" data-x="0" data-y="46" data-w="24" data-h="19">
+          <div class="panel-head drag-handle">
+            <span>SYSTEM MONITOR</span>
+            <div class="panel-head-right"><span class="mini-dot green"></span><span class="mini-label" id="load-label">live</span></div>
+          </div>
+          <div class="panel-body" id="system-panel"></div>
+          <div class="resize-handle"></div>
+        </article>
+
+        <article class="panel stat-panel" data-panel-id="cron" data-x="25" data-y="46" data-w="24" data-h="19">
+          <div class="panel-head drag-handle">
+            <span>SCHEDULER / CRON</span>
+            <div class="panel-head-right"><span class="mini-dot gold"></span><span class="mini-label">jobs</span></div>
+          </div>
+          <div class="panel-body" id="cron-panel"></div>
+          <div class="resize-handle"></div>
+        </article>
+
+        <article class="panel stat-panel" data-panel-id="tokens" data-x="50" data-y="46" data-w="24" data-h="19">
+          <div class="panel-head drag-handle">
+            <span>TOKEN USAGE</span>
+            <div class="panel-head-right"><span class="mini-dot amber"></span><span class="mini-label" id="token-provider">router</span></div>
+          </div>
+          <div class="panel-body" id="tokens-panel"></div>
+          <div class="resize-handle"></div>
+        </article>
+
+        <article class="panel stat-panel" data-panel-id="background" data-x="75" data-y="46" data-w="25" data-h="19">
+          <div class="panel-head drag-handle">
+            <span>BACKGROUND PROCESSES</span>
+            <div class="panel-head-right"><span class="mini-dot green"></span><span class="mini-label">queue</span></div>
+          </div>
+          <div class="panel-body" id="background-panel"></div>
+          <div class="resize-handle"></div>
+        </article>
+
+        <article class="panel agent-panel" data-panel-id="agent" data-x="0" data-y="67" data-w="28" data-h="30">
+          <div class="panel-head drag-handle">
+            <span>DAVID BAYENDOR</span>
+            <div class="panel-head-right">
+              <span class="mini-dot green"></span>
+              <span class="mini-label" id="agent-state-label">idle</span>
+              <button id="avatar-upload-btn" class="ghost-btn panel-action" type="button">upload image</button>
+              <button id="avatar-reset-btn" class="ghost-btn panel-action" type="button">reset</button>
+              <input id="avatar-file-input" type="file" accept="image/*" hidden />
+            </div>
+          </div>
+          <div class="panel-body agent-body">
+            <div class="avatar-stage">
+              <div id="agent-sprite" class="sprite idle"></div>
+              <div class="avatar-shadow"></div>
+            </div>
+            <div class="agent-meta">
+              <div class="agent-name">David Bayendor</div>
+              <div id="agent-details" class="agent-details">standby</div>
+            </div>
+          </div>
+          <div class="resize-handle"></div>
+        </article>
+
+        <article class="panel knowledge-panel" data-panel-id="knowledge" data-x="29" data-y="67" data-w="71" data-h="30">
+          <div class="panel-head drag-handle">
+            <span>MARKDOWN / KNOWLEDGE</span>
+            <div class="panel-head-right"><span class="mini-dot amber"></span><span class="mini-label">memory</span></div>
+          </div>
+          <div class="panel-body knowledge-body">
+            <div class="markdown-toolbar">
+              <span>skills • models • config</span>
+              <span id="events-count">0 events</span>
+            </div>
+            <div id="markdown-view" class="markdown-view"></div>
+          </div>
+          <div class="resize-handle"></div>
+        </article>
+      </div>
+    </main>
+  </div>
+
+  <template id="list-item-template">
+    <div class="list-item">
+      <span class="bullet"></span>
+      <div class="item-text"></div>
+    </div>
+  </template>
+
+  <script src="/vendor/xterm/lib/xterm.js"></script>
+  <script src="/vendor/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

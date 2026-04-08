@@ -1,0 +1,17 @@
+{
+  "name": "hermes-control-interface",
+  "version": "0.1.0",
+  "description": "Hermes Control Interface web dashboard",
+  "main": "server.js",
+  "scripts": {
+    "start": "PORT=10272 node server.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "node-pty": "^1.1.0",
+    "ws": "^8.18.0",
+    "xterm": "^5.3.0",
+    "xterm-addon-fit": "^0.8.0"
+  }
+}

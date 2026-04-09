@@ -249,12 +249,31 @@ body.explorer-fullscreen .explorer-panel {
 body.explorer-fullscreen .explorer-panel .panel-head {
   cursor: default;
 }
+body.explorer-fullscreen .explorer-panel .panel-body {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
 body.explorer-fullscreen .explorer-body {
   height: 100%;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-columns: 1fr 1.3fr;
+  grid-template-rows: 1fr;
 }
 body.explorer-fullscreen .explorer-roots {
   max-height: none;
+  overflow-y: auto;
+}
+body.explorer-fullscreen .editor-shell {
+  min-height: 0;
+  height: 100%;
+}
+body.explorer-fullscreen .file-editor {
+  height: 100%;
+  min-height: 0;
+}
+body.explorer-fullscreen .tree {
+  max-height: none;
+  overflow-y: auto;
 }
 body.explorer-fullscreen .resize-handle { display: none; }
 .terminal-form { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; padding-top: 12px; border-top: 1px solid var(--line-soft); }
@@ -419,6 +438,16 @@ body.explorer-fullscreen .resize-handle { display: none; }
   .panel { position: relative !important; inset: auto !important; width: 100% !important; height: auto !important; min-height: 320px; }
   .resize-handle { display: none !important; }
   .explorer-body { grid-template-columns: 1fr; }
+
+  /* Fullscreen overrides for small screens */
+  body.terminal-fullscreen .terminal-panel,
+  body.explorer-fullscreen .explorer-panel {
+    position: fixed !important;
+    inset: 0 !important;
+    width: 100vw !important;
+    height: 100dvh !important;
+    min-height: 0 !important;
+  }
 }
 
 @media (max-width: 820px) {
@@ -501,6 +530,20 @@ body.explorer-fullscreen .resize-handle { display: none; }
   .quick-actions { grid-template-columns: 1fr 1fr; }
   .quick-actions .ghost-btn { width: 100%; }
   .list, .small-meta, .editor-meta, .editor-path, .terminal-hint { font-size: 11px; }
+
+  /* Fullscreen overrides for mobile */
+  body.terminal-fullscreen .terminal-panel,
+  body.explorer-fullscreen .explorer-panel {
+    position: fixed !important;
+    inset: 0 !important;
+    width: 100vw !important;
+    height: 100dvh !important;
+    min-height: 0 !important;
+  }
+  body.terminal-fullscreen #sidebar,
+  body.explorer-fullscreen #sidebar { display: none !important; }
+  body.terminal-fullscreen #topbar,
+  body.explorer-fullscreen #topbar { display: none !important; }
 }
 
 @media (max-width: 480px) {

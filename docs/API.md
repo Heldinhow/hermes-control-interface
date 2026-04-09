@@ -333,15 +333,29 @@ Saves dashboard layout.
 
 **Auth required:** Yes
 
-Returns the current avatar as a data URL.
+Returns avatar metadata (URL reference, not the full image data).
 
 ```json
 {
   "ok": true,
-  "src": "data:image/jpeg;base64,...",
+  "url": "/api/avatar/image",
   "custom": true
 }
 ```
+
+---
+
+### `GET /api/avatar/image`
+
+**Auth required:** Yes
+
+Returns the avatar image as raw binary with proper `Content-Type` and `Cache-Control` headers. Use this endpoint in `<img>` tags instead of embedding base64 data.
+
+**Response:** Raw image bytes (`image/jpeg`, `image/png`, or `image/webp`).
+
+**Headers:**
+- `Cache-Control: private, max-age=3600` (1 hour browser cache)
+- `Content-Type: image/*` (matches the uploaded format)
 
 ---
 
@@ -358,13 +372,24 @@ Uploads a custom avatar image.
 
 Accepted formats: PNG, JPEG, WebP.
 
+**Response:**
+```json
+{
+  "ok": true,
+  "url": "/api/avatar/image",
+  "custom": true
+}
+```
+
+Triggers a WebSocket snapshot broadcast so connected clients refresh the avatar.
+
 ---
 
 ### `DELETE /api/avatar`
 
 **Auth required:** Yes
 
-Resets avatar to the default photo.
+Resets avatar to the default photo. Triggers a WebSocket broadcast.
 
 ---
 

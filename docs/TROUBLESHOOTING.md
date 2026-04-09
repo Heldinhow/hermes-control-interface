@@ -150,11 +150,27 @@ The WebSocket handshake is failing. Common causes:
 
 ## Metrics panel shows stale or zero data
 
-The metrics refresh every 2 seconds via WebSocket. If you're seeing stale data:
+The metrics update via WebSocket events (no polling). If you're seeing stale data:
 
 1. Check WebSocket is connected (no "Connecting…" message)
-2. Refresh the page
-3. Check the server is not under heavy load (the `/api/usage` endpoint has its own 2-second debounce)
+2. Click the Refresh button in the top bar for a full state reload
+3. Check the server is running: `curl http://localhost:10272/api/health`
+
+---
+
+## Avatar flickers or resets to default
+
+This was a known issue before v1.1.0. If you're still seeing it:
+
+1. Hard refresh the browser (Ctrl+Shift+R) to clear cached JS
+2. Check that `/api/avatar/image` returns 200: `curl -s -o /dev/null -w '%{http_code}' http://localhost:10272/api/avatar/image`
+3. Re-upload the avatar via the dashboard UI
+
+---
+
+## Sessions disappear after avatar upload
+
+Fixed in v1.1.0. Sessions are now included in the snapshot and change detection prevents empty overwrite. If still happening, hard refresh the browser.
 
 ---
 

@@ -58,7 +58,7 @@ if (!CONTROL_PASSWORD || !CONTROL_SECRET) {
 }
 
 const app = express();
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '10mb' }));
 app.use(express.static(path.join(__dirname, 'website')));
 app.use('/vendor/xterm', express.static(path.join(__dirname, 'node_modules/xterm')));
 app.use('/vendor/xterm-addon-fit', express.static(path.join(__dirname, 'node_modules/xterm-addon-fit')));
@@ -524,6 +524,10 @@ function getCronJobs() {
     return data;
   } catch (error) {
     log('cron.list.error', error.message || 'failed to run hermes cron list');
+    // Preserve existing cache on error — don't clobber with empty fallback
+    if (getCronJobs.cache?.data?.length) {
+      return getCronJobs.cache.data;
+    }
   }
   const fallback = cronJobs.map((job) => ({
     ...job,
@@ -608,6 +612,10 @@ function getSessions() {
     return data;
   } catch (error) {
     log('sessions.list.error', error.message || 'failed to run hermes sessions list');
+    // Preserve existing cache on error — don't clobber with empty fallback
+    if (hermesSidebarSessionsCache.data.length) {
+      return hermesSidebarSessionsCache.data;
+    }
     return Array.from(sessions.entries()).map(([id, messages]) => ({
       id,
       title: 'local chat',
@@ -632,6 +640,10 @@ function getAllSessions() {
     return data;
   } catch (error) {
     log('sessions.list.error', error.message || 'failed to run hermes sessions list');
+    // Preserve existing cache on error — don't clobber with empty fallback
+    if (hermesAllSessionsCache.data.length) {
+      return hermesAllSessionsCache.data;
+    }
     return Array.from(sessions.entries()).map(([id, messages]) => ({
       id,
       title: 'local chat',
@@ -781,7 +793,8 @@ function buildDashboardState(authed = false) {
     passwordRequired: true,
     authed,
     system: getSystem(),
-    sessionCount: sessions.size,
+    sessionCount: getSessions().length,
+    sessions: getSessions(),
     allSessions: getAllSessions(),
     cronJobs: getCronJobs(),
     quickActions,
@@ -796,7 +809,8 @@ function buildDashboardState(authed = false) {
     loginIdentity: 'root@hermes',
     workingDir: PROJECT_ROOT,
     avatar: {
-      src: getAvatarDataUrl(),
+      url: '/api/avatar/image',
+      custom: !!readAvatarOverride(),
     },
     terminal: {
       ready: terminal.ready,
@@ -1030,7 +1044,7 @@ app.post('/api/layout', requireAuth, (req, res) => {
 });
 
 app.get('/api/avatar', requireAuth, (req, res) => {
-  res.json({ ok: true, src: getAvatarDataUrl(), custom: !!readAvatarOverride() });
+  res.json({ ok: true, url: '/api/avatar/image', custom: !!readAvatarOverride() });
 });
 
 app.post('/api/avatar', requireAuth, (req, res) => {
@@ -1041,7 +1055,7 @@ app.post('/api/avatar', requireAuth, (req, res) => {
   writeAvatarOverride(dataUrl);
   log('avatar.uploaded', `len ${dataUrl.length}`);
   broadcast();
-  return res.json({ ok: true, src: dataUrl, custom: true });
+  return res.json({ ok: true, url: '/api/avatar/image', custom: true });
 });
 
 app.delete('/api/avatar', requireAuth, (req, res) => {
@@ -1049,6 +1063,26 @@ app.delete('/api/avatar', requireAuth, (req, res) => {
   log('avatar.reset', 'avatar reverted to default photo');
   broadcast();
   return res.json({ ok: true, src: getAvatarDataUrl(), custom: false });
+});
+
+app.get('/api/avatar/image', requireAuth, (req, res) => {
+  const override = readAvatarOverride();
+  if (override) {
+    const match = override.match(/^data:(image\/\w+);base64,(.+)$/);
+    if (match) {
+      res.set('Content-Type', match[1]);
+      res.set('Cache-Control', 'private, max-age=3600');
+      return res.send(Buffer.from(match[2], 'base64'));
+    }
+  }
+  try {
+    const buf = fs.readFileSync(DEFAULT_AVATAR_FALLBACK);
+    res.set('Content-Type', 'image/jpeg');
+    res.set('Cache-Control', 'private, max-age=3600');
+    return res.send(buf);
+  } catch {
+    return res.status(404).send('no avatar');
+  }
 });
 
 app.get('/api/health', (req, res) => {
@@ -1114,9 +1148,7 @@ wss.on('connection', (socket, req) => {
   });
 });
 
-setInterval(() => {
-  log('system.metrics.updated', `mem ${formatBytes(process.memoryUsage().rss)} load ${os.loadavg()[0].toFixed(2)}`);
-  broadcast();
-}, 2000);
+// Broadcast only on actual state changes (avatar upload/delete, cron actions).
+// No periodic broadcast — clients get updates via WS events and targeted API calls.
 
 log('system.started', 'Hermes Control Interface booted');

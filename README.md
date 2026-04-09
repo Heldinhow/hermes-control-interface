@@ -11,7 +11,7 @@ A self-hosted web dashboard for the Hermes AI agent stack. Provides a browser-ba
 - **Terminal** — Real PTY shell (node-pty) in the browser via xterm.js. Full ANSI colour, persistent session.
 - **File Explorer** — Browse and edit files across configurable root directories. No upload/download friction.
 - **Session Monitor** — Live view of Hermes sessions and cron jobs.
-- **System Metrics** — CPU, memory, uptime, refreshed every 2 seconds over WebSocket.
+- **System Metrics** — CPU, memory, uptime. Event-driven updates via WebSocket (no polling).
 - **Rate-Limited Auth** — 5 failed login attempts in 15 minutes → 15-minute lockout. Timing-safe password comparison. HMAC-signed session cookies.
 - **Layout Persistence** — Dashboard panel arrangement saved to `~/.hermes/control-interface-layout.json`.
 
@@ -136,7 +136,8 @@ See [docs/SECURITY.md](docs/SECURITY.md) for the full security analysis.
 | `GET` | `/api/usage` | Yes | System metrics |
 | `GET` | `/api/layout` | Yes | Get layout |
 | `POST` | `/api/layout` | Yes | Save layout |
-| `GET` | `/api/avatar` | Yes | Get avatar |
+| `GET` | `/api/avatar` | Yes | Get avatar metadata (url + custom flag) |
+| `GET` | `/api/avatar/image` | Yes | Get avatar image (raw binary, cacheable) |
 | `POST` | `/api/avatar` | Yes | Upload avatar |
 | `DELETE` | `/api/avatar` | Yes | Reset avatar |
 | `WS` | `/ws` | Yes | Live dashboard updates + terminal I/O |
@@ -163,6 +164,29 @@ hermes-control-interface/
 ├── install.sh         # Interactive first-run setup
 └── package.json
 ```
+
+---
+
+## Changelog
+
+### v1.1.0 — Stability Fixes (2026-04-09)
+
+**Avatar system rewrite:**
+- Avatar served via dedicated `/api/avatar/image` endpoint (raw binary with cache headers)
+- No more ~700KB base64 embedded in every WebSocket snapshot
+- Client-side avatar image caching — no flicker on re-render
+
+**Event-driven refresh (removed all polling):**
+- Removed server-side 15-second broadcast interval (`setInterval(broadcast, 15000)`)
+- Removed client-side 10-second session poller
+- Snapshots only broadcast on actual state changes (avatar upload/delete, cron actions, terminal events)
+- Manual refresh button still works for full state reload
+
+**Smart rendering:**
+- Change detection on all panels — DOM only rebuilds when data actually changed
+- File explorer scroll position preserved across re-renders
+- Sessions list stable during avatar upload (no "no sessions found" flash)
+- Sprite animation loop skips when custom avatar is loaded
 
 ---
 

@@ -23,6 +23,7 @@ const state = {
   avatarCanvas: null,
   avatarCtx: null,
   avatarState: 'idle',
+  avatarLoadId: 0,
   spriteTick: 0,
   widgetLayoutReady: false,
   layoutEditMode: false,
@@ -73,6 +74,7 @@ const els = {
   tokensPanel: $('#tokens-panel'),
   backgroundPanel: $('#background-panel'),
   explorerPanel: $('#explorer-panel'),
+  knowledgePanel: $('#knowledge-panel'),
   sprite: $('#agent-sprite'),
   agentStateLabel: $('#agent-state-label'),
   agentDetails: $('#agent-details'),
@@ -375,9 +377,6 @@ function syncTerminalSize() {
 
 function setTerminalFullscreen(enabled) {
   state.terminalFullscreen = Boolean(enabled);
-  if (state.terminalFullscreen && window.matchMedia('(max-width: 1200px)').matches) {
-    state.terminalFullscreen = false;
-  }
   document.body.classList.toggle('terminal-fullscreen', state.terminalFullscreen);
   els.shell.classList.toggle('terminal-fullscreen', state.terminalFullscreen);
   const panel = document.querySelector('[data-panel-id="terminal"]');
@@ -394,9 +393,6 @@ function setTerminalFullscreen(enabled) {
 
 function setExplorerFullscreen(enabled) {
   state.explorerFullscreen = Boolean(enabled);
-  if (state.explorerFullscreen && window.matchMedia('(max-width: 1200px)').matches) {
-    state.explorerFullscreen = false;
-  }
   document.body.classList.toggle('explorer-fullscreen', state.explorerFullscreen);
   els.shell.classList.toggle('explorer-fullscreen', state.explorerFullscreen);
   const panel = document.querySelector('[data-panel-id="explorer"]');
@@ -448,13 +444,37 @@ function renderList(container, items, formatter) {
 function renderSidebarAgent(snapshot) {
   const a = snapshot.agent || {};
   const normalized = normalizeAgentState(a.state, a.details);
-  const sessionCount = snapshot.sessionCount ?? (a.details || normalized);
+  const sessions = Array.isArray(snapshot.sessions) ? snapshot.sessions : [];
+  const sessionCount = snapshot.sessionCount ?? sessions.length ?? 0;
   const label = a.label || 'David';
   const stateText = a.state || normalized;
   const detailsText = `${label} • ${sessionCount} sessions`;
   if (els.sidebarAgentState) els.sidebarAgentState.textContent = stateText;
   if (els.sidebarAgentDetails) els.sidebarAgentDetails.textContent = detailsText;
-  drawSidebarSprite(normalized, a.frame || 0, snapshot.avatar?.src);
+  const avatarUrl = snapshot.avatar?.url || '';
+  const hasCustomAvatar = snapshot.avatar?.custom;
+  // Reload avatar if URL changed OR custom flag changed (forces cache-busted reload after upload)
+  const avatarKey = `${avatarUrl}|${hasCustomAvatar}`;
+  if (avatarUrl && avatarKey !== state._lastSidebarAvatarKey) {
+    state._lastSidebarAvatarKey = avatarKey;
+    // Preload the image so we can draw it without flicker
+    const cacheBustedUrl = hasCustomAvatar ? `${avatarUrl}?t=${Date.now()}` : avatarUrl;
+    const img = new Image();
+    img.onload = () => {
+      state._sidebarAvatarImg = img;
+      state._sidebarAvatarReady = true;
+      // Redraw sprite with new avatar overlay
+      const a = state.snapshot?.agent || {};
+      const normalized = normalizeAgentState(a.state, a.details);
+      drawSidebarSprite(normalized, a.frame || 0);
+    };
+    img.onerror = () => {
+      state._sidebarAvatarImg = null;
+      state._sidebarAvatarReady = false;
+    };
+    img.src = cacheBustedUrl;
+  }
+  drawSidebarSprite(normalized, a.frame || 0);
 }
 
 const SIDEBAR_COLORS = {
@@ -464,7 +484,7 @@ const SIDEBAR_COLORS = {
   w: '#ffffff', d: '#9ca3af', '-': 'transparent',
 };
 
-function drawSidebarSprite(stateName, frameIdx, avatarSrc) {
+function drawSidebarSprite(stateName, frameIdx) {
   const canvas = els.sidebarAgentSprite;
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
@@ -477,7 +497,7 @@ function drawSidebarSprite(stateName, frameIdx, avatarSrc) {
   ctx.fillStyle = 'transparent';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  // Draw sprite
+  // Draw pixel sprite
   for (let row = 0; row < frame.length; row++) {
     const line = frame[row] || '';
     for (let col = 0; col < line.length; col++) {
@@ -489,14 +509,43 @@ function drawSidebarSprite(stateName, frameIdx, avatarSrc) {
     }
   }
 
-  // Overlay custom avatar image on top of sprite
-  if (avatarSrc) {
-    const img = new Image();
-    img.onload = () => {
+  // Overlay cached custom avatar image on top of sprite (no flicker — image is preloaded)
+  if (state._sidebarAvatarReady && state._sidebarAvatarImg) {
+    const img = state._sidebarAvatarImg;
+    ctx.imageSmoothingEnabled = false;
+
+    if (stateName === 'thinking') {
+      // Pixelated effect: draw small then scale up
+      const px = 12; // pixel size
+      const sw = Math.ceil(canvas.width / px);
+      const sh = Math.ceil(canvas.height / px);
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(img, 0, 0, sw, sh);
       ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(canvas, 0, 0, sw, sh, 0, 0, canvas.width, canvas.height);
+      // Warm tint
+      ctx.fillStyle = 'rgba(244, 199, 92, 0.12)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    } else if (stateName === 'error') {
+      // Red tint + slight blur via pixelation
+      const px = 8;
+      const sw = Math.ceil(canvas.width / px);
+      const sh = Math.ceil(canvas.height / px);
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(img, 0, 0, sw, sh);
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(canvas, 0, 0, sw, sh, 0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = 'rgba(255, 80, 80, 0.18)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    } else {
+      // idle / executing: clean draw
       ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    };
-    img.src = avatarSrc;
+      if (stateName === 'executing') {
+        // Subtle glow pulse
+        ctx.fillStyle = `rgba(103, 240, 162, ${0.05 + (frameIdx * 0.03)})`;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
+    }
   }
 }
 
@@ -525,6 +574,8 @@ async function pollSidebarSessions() {
     const res = await fetch('/api/sessions');
     if (!res.ok) return;
     const data = await res.json();
+    // Only update if we got actual sessions — don't overwrite with empty
+    if (!Array.isArray(data.sessions) || data.sessions.length === 0) return;
     // Merge sessions into current snapshot without replacing the whole thing
     if (state.snapshot) {
       state.snapshot.sessions = data.sessions;
@@ -758,26 +809,34 @@ function ensureAvatarCanvas() {
   return canvas;
 }
 
-function loadAvatarImage(src) {
-  if (!src) return;
-  if (state.avatarSource === src && state.avatarImage) return;
-  state.avatarSource = src;
+function loadAvatarImage(url, isCustom) {
+  if (!url) return;
+  // Use cache-busted URL for custom avatars so they reload on change
+  const resolvedUrl = isCustom ? `${url}?t=${Date.now()}` : url;
+  if (state.avatarSource === resolvedUrl && state.avatarImage) return;
+  if (state._avatarLoadingSrc === resolvedUrl) return;
+  state.avatarSource = resolvedUrl;
+  state._avatarLoadingSrc = resolvedUrl;
   const img = new Image();
   img.decoding = 'async';
   img.onload = () => {
+    if (state._avatarLoadingSrc !== resolvedUrl) return;
     state.avatarImage = img;
     paintSprite(state.avatarState || 'idle', state.spriteTick);
   };
   img.onerror = () => {
+    if (state._avatarLoadingSrc !== resolvedUrl) return;
     state.avatarImage = null;
+    state._avatarLoadingSrc = null;
   };
-  img.src = src;
+  img.src = resolvedUrl;
 }
 
 function paintSprite(stateName, frameIndex) {
   state.avatarState = stateName || 'idle';
-  const src = state.snapshot?.avatar?.src || state.avatarSource;
-  if (src) loadAvatarImage(src);
+  const avatarUrl = state.snapshot?.avatar?.url;
+  const isCustom = state.snapshot?.avatar?.custom;
+  if (avatarUrl) loadAvatarImage(avatarUrl, isCustom);
   const canvas = ensureAvatarCanvas();
   const ctx = state.avatarCtx || canvas.getContext('2d', { alpha: false });
   state.avatarCtx = ctx;
@@ -815,19 +874,52 @@ function paintSprite(stateName, frameIndex) {
   ctx.clearRect(0, 0, lowW, lowH);
   ctx.drawImage(image, 0, 0, lowW, lowH);
 
+  // Apply state-based visual effects on top of avatar
   if (state.avatarState === 'thinking') {
-    ctx.fillStyle = 'rgba(244, 199, 92, 0.06)';
+    // Pixelated effect: draw tiny then scale up
+    const px = Math.max(4, Math.round(lowW / 8));
+    const sw = Math.ceil(lowW / px);
+    const sh = Math.ceil(lowH / px);
+    ctx.imageSmoothingEnabled = true;
+    ctx.clearRect(0, 0, lowW, lowH);
+    ctx.drawImage(image, 0, 0, sw, sh);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(canvas, 0, 0, sw, sh, 0, 0, lowW, lowH);
+    ctx.fillStyle = 'rgba(244, 199, 92, 0.10)';
     ctx.fillRect(0, 0, lowW, lowH);
   } else if (state.avatarState === 'error') {
-    ctx.fillStyle = 'rgba(255, 113, 113, 0.08)';
+    // Red tint + pixelation
+    const px = Math.max(3, Math.round(lowW / 10));
+    const sw = Math.ceil(lowW / px);
+    const sh = Math.ceil(lowH / px);
+    ctx.imageSmoothingEnabled = true;
+    ctx.clearRect(0, 0, lowW, lowH);
+    ctx.drawImage(image, 0, 0, sw, sh);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(canvas, 0, 0, sw, sh, 0, 0, lowW, lowH);
+    ctx.fillStyle = 'rgba(255, 80, 80, 0.15)';
     ctx.fillRect(0, 0, lowW, lowH);
+  } else if (state.avatarState === 'executing') {
+    // Clean + green glow pulse
+    ctx.clearRect(0, 0, lowW, lowH);
+    ctx.drawImage(image, 0, 0, lowW, lowH);
+    ctx.fillStyle = `rgba(103, 240, 162, ${0.04 + (frameIndex % 3) * 0.02})`;
+    ctx.fillRect(0, 0, lowW, lowH);
+  } else {
+    // idle: clean, slight contrast boost
+    ctx.filter = 'contrast(1.04) brightness(1.02)';
+    ctx.clearRect(0, 0, lowW, lowH);
+    ctx.drawImage(image, 0, 0, lowW, lowH);
+    ctx.filter = 'none';
   }
 }
 
 function normalizeAgentState(rawState, details = '') {
   const state = String(rawState || details || 'idle').toLowerCase();
   if (state.includes('error') || state.includes('fail') || state.includes('halt') || state.includes('panic')) return 'error';
-  if (state.includes('think') || state.includes('exec') || state.includes('run') || state.includes('work') || state.includes('busy') || state.includes('coding')) return 'thinking';
+  if (state.includes('exec') || state.includes('run') || state.includes('busy')) return 'executing';
+  if (state.includes('coding') || state.includes('build')) return 'thinking';
+  if (state.includes('think') || state.includes('work')) return 'thinking';
   return 'idle';
 }
 
@@ -844,9 +936,17 @@ function renderAgent(snapshot) {
 function renderTreeRoots(snapshot) {
   const roots = Array.isArray(snapshot.explorerRoots) ? snapshot.explorerRoots : [];
   if (!els.explorerRoots) return;
+
+  // Skip rebuild if tree data hasn't changed (prevent scroll reset on every snapshot)
+  const rootsFingerprint = roots.map(r => r.key + ':' + (r.children?.length || 0)).join(',');
+  if (rootsFingerprint === state._lastRootsFingerprint) return;
+  state._lastRootsFingerprint = rootsFingerprint;
+
   if (!roots.some((root) => state.expandedRoots.has(root.key))) {
     state.expandedRoots = new Set(roots.map((root) => root.key));
   }
+  // Save scroll position before DOM rebuild
+  const scrollBefore = els.explorerRoots.scrollTop;
   els.explorerRoots.innerHTML = '';
 
   if (!roots.length) {
@@ -866,6 +966,7 @@ function renderTreeRoots(snapshot) {
     head.addEventListener('click', () => {
       if (state.expandedRoots.has(root.key)) state.expandedRoots.delete(root.key);
       else state.expandedRoots.add(root.key);
+      state._lastRootsFingerprint = null; // force rebuild
       renderTreeRoots(state.snapshot || snapshot);
     });
 
@@ -887,6 +988,7 @@ function renderTreeRoots(snapshot) {
         if (isDir) {
           if (state.expandedDirs.has(node.path)) state.expandedDirs.delete(node.path);
           else state.expandedDirs.add(node.path);
+          state._lastRootsFingerprint = null; // force rebuild
           renderTreeRoots(state.snapshot || snapshot);
           return;
         }
@@ -908,6 +1010,10 @@ function renderTreeRoots(snapshot) {
     block.appendChild(head);
     block.appendChild(tree);
     els.explorerRoots.appendChild(block);
+  });
+  // Restore scroll position after DOM rebuild
+  requestAnimationFrame(() => {
+    if (els.explorerRoots) els.explorerRoots.scrollTop = scrollBefore;
   });
 }
 
@@ -982,8 +1088,29 @@ function setLocked(locked) {
   els.shell.classList.toggle('locked', locked);
 }
 
+function snapshotDataChanged(prev, next, key) {
+  if (!prev) return true;
+  if (key === 'sessions') {
+    const a = prev.sessions?.map(s => s.id).join(',') || '';
+    const b = next.sessions?.map(s => s.id).join(',') || '';
+    return a !== b;
+  }
+  if (key === 'explorerRoots') {
+    const a = prev.explorerRoots?.map(r => r.key + ':' + (r.children?.length || 0)).join(',') || '';
+    const b = next.explorerRoots?.map(r => r.key + ':' + (r.children?.length || 0)).join(',') || '';
+    return a !== b;
+  }
+  if (key === 'system') return JSON.stringify(prev.system) !== JSON.stringify(next.system);
+  if (key === 'cronJobs') return JSON.stringify(prev.cronJobs) !== JSON.stringify(next.cronJobs);
+  if (key === 'tokens') return JSON.stringify(prev.tokens) !== JSON.stringify(next.tokens);
+  if (key === 'background') return JSON.stringify(prev.background) !== JSON.stringify(next.background);
+  if (key === 'knowledge') return prev.knowledge !== next.knowledge;
+  return true;
+}
+
 function renderSnapshot(snapshot) {
   if (!els.topbar?.textContent) return; // Defensive: DOM not ready
+  const prev = state.snapshot;
   state.snapshot = snapshot;
   document.title = `Hermes Control Interface • ${snapshot.agent?.state || 'idle'}`;
   if (els.statusPill) {
@@ -1002,16 +1129,19 @@ function renderSnapshot(snapshot) {
   if (els.terminalLabel) els.terminalLabel.textContent = snapshot.loginIdentity || 'root@hermes';
   if (els.terminalPrompt) els.terminalPrompt.textContent = snapshot.terminal?.prompt || `${snapshot.loginIdentity || 'root@hermes'}:${snapshot.terminal?.cwd || snapshot.workingDir || '/'}#`;
 
+  // Always update sidebar agent (lightweight — just text + cached avatar draw)
   renderSidebarAgent(snapshot);
-  renderSessions(snapshot);
+
+  // Only re-render panels if their data actually changed
+  if (snapshotDataChanged(prev, snapshot, 'sessions')) renderSessions(snapshot);
   renderQuickActions(snapshot);
-  if (els.systemPanel) renderSystem(snapshot);
-  if (els.cronPanel) renderCron(snapshot);
-  if (els.tokensPanel) renderTokens(snapshot);
-  if (els.backgroundPanel) renderBackground(snapshot);
+  if (els.systemPanel && snapshotDataChanged(prev, snapshot, 'system')) renderSystem(snapshot);
+  if (els.cronPanel && snapshotDataChanged(prev, snapshot, 'cronJobs')) renderCron(snapshot);
+  if (els.tokensPanel && snapshotDataChanged(prev, snapshot, 'tokens')) renderTokens(snapshot);
+  if (els.backgroundPanel && snapshotDataChanged(prev, snapshot, 'background')) renderBackground(snapshot);
   if (els.agentPanel) renderAgent(snapshot);
-  if (els.knowledgePanel) renderKnowledge(snapshot);
-  if (els.explorerPanel) renderTreeRoots(snapshot);
+  if (els.knowledgePanel && snapshotDataChanged(prev, snapshot, 'knowledge')) renderKnowledge(snapshot);
+  if (els.explorerPanel && snapshotDataChanged(prev, snapshot, 'explorerRoots')) renderTreeRoots(snapshot);
   if (!state.terminal && els.terminalOutput) renderTerminalBuffer(snapshot.terminal);
 }
 
@@ -1040,11 +1170,12 @@ function connectWs() {
     try {
       const data = JSON.parse(event.data);
       if (data.type === 'snapshot') {
-        // Merge: keep existing sessions data from polling, overwrite everything else
         const prev = state.snapshot || {};
         const incoming = data.payload || {};
-        state.snapshot = { ...incoming, sessions: prev.sessions || incoming.sessions || [] };
-        renderSnapshot(state.snapshot);
+        // Preserve existing sessions if incoming has none (server may not always include them)
+        const hasIncomingSessions = Array.isArray(incoming.sessions) && incoming.sessions.length > 0;
+        const mergedSnapshot = { ...incoming, sessions: hasIncomingSessions ? incoming.sessions : (prev.sessions || []) };
+        renderSnapshot(mergedSnapshot);
       }
       if (data.type === 'terminal-transcript') {
         renderTerminalBuffer(data);
@@ -1057,7 +1188,11 @@ function connectWs() {
     } catch {}
   });
   socket.addEventListener('close', () => {
-    if (state.socket === socket) state.socket = null;
+    if (state.socket === socket) {
+      state.socket = null;
+      // Auto-reconnect after 3s
+      setTimeout(() => connectWs(), 3000);
+    }
   });
 }
 
@@ -1229,8 +1364,15 @@ async function uploadAvatarFile(file) {
     reader.onerror = () => reject(new Error('failed to read image'));
     reader.readAsDataURL(file);
   });
+  // Reset cached avatar so the new image loads on next snapshot/render
+  state._lastSidebarAvatarKey = null;
+  state._sidebarAvatarImg = null;
+  state._sidebarAvatarReady = false;
+  state.avatarSource = '';
+  state.avatarImage = null;
+  state._avatarLoadingSrc = null;
   await postJson('/api/avatar', { dataUrl });
-  await fetchSnapshot();
+  // Don't call fetchSnapshot() — server broadcasts on avatar change
 }
 
 
@@ -1369,18 +1511,22 @@ function bindUi() {
   els.saveBtn.addEventListener('click', saveCurrentFile);
   els.avatarUploadBtn?.addEventListener('click', () => els.avatarFileInput?.click());
   els.avatarResetBtn?.addEventListener('click', async () => {
+    // Reset cached avatar so the default loads on next snapshot
+    state._lastSidebarAvatarKey = null;
+    state._sidebarAvatarImg = null;
+    state._sidebarAvatarReady = false;
+    state.avatarSource = '';
+    state.avatarImage = null;
+    state._avatarLoadingSrc = null;
     await postJson('/api/avatar', {}, 'DELETE');
-    await fetchSnapshot();
+    // Don't call fetchSnapshot() — server broadcasts on avatar change
   });
   els.avatarFileInput?.addEventListener('change', async () => {
     const file = els.avatarFileInput.files?.[0];
     if (!file) return;
     try {
       await uploadAvatarFile(file);
-      const snap = await fetchSnapshot();
-      if (snap?.agent) {
-        addLine('avatar updated', 'green');
-      }
+      addLine('avatar updated', 'green');
       els.avatarFileInput.value = '';
     } catch (error) {
       addLine(`avatar upload failed: ${error.message}`, 'red');
@@ -1424,6 +1570,10 @@ function startClock() {
 function startSpriteLoop() {
   setInterval(() => {
     if (!state.snapshot) return;
+    // Only animate the pixel sprite — skip redraw when custom avatar is loaded and ready
+    // (the cached avatar image is drawn on top each time drawSidebarSprite runs,
+    //  but we don't need to repaint the canvas 2x/sec when there's a static custom avatar)
+    if (state._sidebarAvatarReady) return;
     const a = state.snapshot.agent || {};
     const normalized = normalizeAgentState(a.state, a.details);
     drawSidebarSprite(normalized, state.spriteTick++ % 2);
@@ -1445,7 +1595,6 @@ async function boot() {
     connectWs();
     await loadLayoutState();
     await fetchSnapshot();
-    startSessionsPoller();
   } else {
     setLocked(true);
   }

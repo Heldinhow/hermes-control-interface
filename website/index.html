@@ -46,8 +46,7 @@
 
   <div id="shell" class="locked">
     <aside id="sidebar">
-      <section class="side-section" id="sidebar-agent-section">
-        <div class="side-title">David Bayendor</div>
+      <section class="side-section">
         <div id="sidebar-agent-body" class="sidebar-agent-body">
           <canvas id="sidebar-agent-sprite" class="sidebar-agent-sprite" width="64" height="72"></canvas>
           <div class="sidebar-agent-info">
@@ -55,10 +54,11 @@
             <div id="sidebar-agent-details" class="sidebar-agent-details">standby</div>
           </div>
         </div>
-      </section>
-      <section class="side-section">
-        <div class="side-title">Sessions</div>
-        <div id="sessions-list" class="list"></div>
+        <div class="sidebar-agent-controls">
+          <input type="file" id="avatar-file-input" accept="image/*" style="display:none">
+          <button id="avatar-upload-btn" class="ghost-btn" type="button">upload</button>
+          <button id="avatar-reset-btn" class="ghost-btn" type="button">reset</button>
+        </div>
       </section>
       <section class="side-section">
         <div class="side-title">Quick actions</div>

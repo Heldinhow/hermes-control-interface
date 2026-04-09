@@ -445,12 +445,15 @@ function renderList(container, items, formatter) {
 }
 
 function renderSidebarAgent(snapshot) {
-  const agent = snapshot.agent || {};
-  const label = agent.label || 'idle';
-  const details = agent.details || 'standby';
-  if (els.sidebarAgentState) els.sidebarAgentState.textContent = label;
-  if (els.sidebarAgentDetails) els.sidebarAgentDetails.textContent = details;
-  drawSidebarSprite(agent.state || 'idle', agent.frame || 0);
+  const a = snapshot.agent || {};
+  const normalized = normalizeAgentState(a.state, a.details);
+  const sessionCount = snapshot.sessionCount ?? (a.details || normalized);
+  const label = a.label || 'David';
+  const stateText = a.state || normalized;
+  const detailsText = `${label} • ${sessionCount} sessions`;
+  if (els.sidebarAgentState) els.sidebarAgentState.textContent = stateText;
+  if (els.sidebarAgentDetails) els.sidebarAgentDetails.textContent = detailsText;
+  drawSidebarSprite(normalized, a.frame || 0);
 }
 
 const SIDEBAR_COLORS = {
@@ -486,6 +489,7 @@ function drawSidebarSprite(stateName, frameIdx) {
 
 function renderSessions(snapshot) {
   // Sessions rendered from /api/sessions polling (limit 10)
+  if (!els.sessionsList) return;
   const sessions = Array.isArray(snapshot.sessions) ? snapshot.sessions : [];
   if (!sessions.length) {
     els.sessionsList.innerHTML = '<div class="list-item"><span class="bullet" style="background: var(--amber);"></span><div class="item-text">No sessions found<span class="meta">run hermes sessions list</span></div></div>';
@@ -969,6 +973,7 @@ function setLocked(locked) {
 }
 
 function renderSnapshot(snapshot) {
+  if (!els.topbar) return; // Defensive: DOM not ready
   state.snapshot = snapshot;
   document.title = `Hermes Control Interface • ${snapshot.agent?.state || 'idle'}`;
   els.statusPill.textContent = snapshot.authed ? 'LIVE' : 'LOCKED';
@@ -976,13 +981,14 @@ function renderSnapshot(snapshot) {
   els.modelPill.textContent = snapshot.configSummary?.defaultModel || snapshot.models?.[0]?.value || 'model';
   els.statePill.textContent = snapshot.agent?.state || 'idle';
   els.statePill.className = 'pill warn';
-  els.busState.textContent = snapshot.authed ? 'ws' : 'locked';
-  els.busState.style.color = snapshot.authed ? 'var(--green)' : 'var(--amber)';
+  if (els.busState) {
+    els.busState.textContent = snapshot.authed ? 'ws' : 'locked';
+    els.busState.style.color = snapshot.authed ? 'var(--green)' : 'var(--amber)';
+  }
   els.terminalLabel.textContent = snapshot.loginIdentity || 'root@hermes';
   els.terminalPrompt.textContent = snapshot.terminal?.prompt || `${snapshot.loginIdentity || 'root@hermes'}:${snapshot.terminal?.cwd || snapshot.workingDir || '/'}#`;
 
   renderSidebarAgent(snapshot);
-  renderSessions(snapshot);
   renderQuickActions(snapshot);
   renderSystem(snapshot);
   renderCron(snapshot);

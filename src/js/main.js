@@ -505,6 +505,12 @@ async function loadAgentDashboard(container, name) {
 // Agent tab stubs (will implement per module)
 async function loadAgentSessions(container, name) {
   container.innerHTML = `
+    <div class="card-grid" style="margin-bottom:16px;">
+      <div class="card" id="session-stats-${name}">
+        <div class="card-title">Session Stats</div>
+        <div class="loading">Loading stats...</div>
+      </div>
+    </div>
     <div style="display:flex;gap:8px;margin-bottom:16px;align-items:center;">
       <input type="text" id="session-search" placeholder="Search sessions..." style="flex:1;" />
       <button class="btn btn-ghost" onclick="loadAgentSessions(document.getElementById('agent-tab-content'), '${name}')">↻ Refresh</button>
@@ -513,6 +519,9 @@ async function loadAgentSessions(container, name) {
       <div class="loading">Loading sessions for ${name}...</div>
     </div>
   `;
+
+  // Load session stats
+  loadSessionStats(name);
 
   try {
     const res = await api('/api/all-sessions');
@@ -592,15 +601,59 @@ async function loadAgentSessions(container, name) {
   }
 }
 
-async function resumeSession(sessionId) {
-  // Copy resume command to clipboard
-  const cmd = `hermes -p ${state.currentAgent || 'david'} -r ${sessionId}`;
+async function loadSessionStats(name) {
+  const el = document.getElementById(`session-stats-${name}`);
+  if (!el) return;
   try {
-    await navigator.clipboard.writeText(cmd);
-    showToast('Resume command copied! Paste in CLI.', 'success');
+    const res = await api('/api/sessions/stats');
+    if (res.ok && res.stats) {
+      // Parse stats output
+      const raw = res.stats;
+      const totalMatch = raw.match(/Total sessions:\s+(\d+)/);
+      const messagesMatch = raw.match(/Total messages:\s+([\d,]+)/);
+      const dbMatch = raw.match(/Database size:\s+(.+)/);
+      const cliMatch = raw.match(/cli:\s+(\d+)\s+sessions/);
+      const tgMatch = raw.match(/telegram:\s+(\d+)\s+sessions/);
+      const waMatch = raw.match(/whatsapp:\s+(\d+)\s+sessions/);
+
+      el.innerHTML = `
+        <div class="card-title">Session Stats</div>
+        <div class="stat-row"><span class="stat-label">Total sessions</span><span class="stat-value">${totalMatch?.[1] || '—'}</span></div>
+        <div class="stat-row"><span class="stat-label">Total messages</span><span class="stat-value">${messagesMatch?.[1]?.toLocaleString() || '—'}</span></div>
+        <div class="stat-row"><span class="stat-label">DB size</span><span class="stat-value">${dbMatch?.[1] || '—'}</span></div>
+        <div style="margin-top:6px;font-size:10px;color:var(--fg-subtle);text-transform:uppercase;">By Platform</div>
+        ${cliMatch ? `<div class="stat-row"><span class="stat-label">CLI</span><span class="stat-value">${cliMatch[1]} sessions</span></div>` : ''}
+        ${tgMatch ? `<div class="stat-row"><span class="stat-label">Telegram</span><span class="stat-value">${tgMatch[1]} sessions</span></div>` : ''}
+        ${waMatch ? `<div class="stat-row"><span class="stat-label">WhatsApp</span><span class="stat-value">${waMatch[1]} sessions</span></div>` : ''}
+      `;
+    } else {
+      el.innerHTML = '<div class="card-title">Session Stats</div><div class="stat-row"><span class="stat-label">No stats available</span></div>';
+    }
   } catch {
-    showToast(`Run: ${cmd}`, 'info');
+    el.innerHTML = '<div class="card-title">Session Stats</div><div class="error-msg">Failed to load stats</div>';
   }
+}
+
+async function resumeSession(sessionId) {
+  const agent = state.currentAgent || 'david';
+  const cmd = `hermes -p ${agent} -r ${sessionId}`;
+  await showModal({
+    title: 'Resume Session',
+    message: `Run this command in your terminal to resume:\n\n${cmd}`,
+    buttons: [
+      { text: 'Close', value: null },
+      { text: 'Copy Command', primary: true, value: 'copy' },
+    ],
+  }).then(async (result) => {
+    if (result?.action === 'copy') {
+      try {
+        await navigator.clipboard.writeText(cmd);
+        showToast('Command copied!', 'success');
+      } catch {
+        showToast('Copy failed — manually copy the command', 'error');
+      }
+    }
+  });
 }
 
 async function renameSession(sessionId, currentTitle) {
@@ -1231,7 +1284,17 @@ async function runDoctor(fix = false) {
       headers: { 'X-CSRF-Token': csrfToken },
       body: JSON.stringify({ fix }),
     });
-    el.innerHTML = `<pre style="font-size:11px;white-space:pre-wrap;color:var(--fg-muted);">${escapeHtml(res.output || 'No output')}</pre>`;
+    if (res.ok && res.output) {
+      // Style the output
+      const styled = escapeHtml(res.output)
+        .replace(/✓/g, '<span style="color:var(--green);">✓</span>')
+        .replace(/✗/g, '<span style="color:var(--red);">✗</span>')
+        .replace(/◆/g, '<span style="color:var(--yellow);">◆</span>')
+        .replace(/(🩺.*?)(?=<)/g, '<strong style="color:var(--fg);">$1</strong>');
+      el.innerHTML = `<div style="font-size:11px;line-height:1.8;max-height:400px;overflow-y:auto;padding:8px;">${styled}</div>`;
+    } else {
+      el.innerHTML = `<div class="error-msg">${res.output || 'No output'}</div>`;
+    }
   } catch (e) {
     el.innerHTML = `<div class="error-msg">${e.message}</div>`;
   }
@@ -1663,6 +1726,7 @@ Object.assign(window, {
   deleteSession,
   gatewayAction,
   loadGatewayLogs,
+  loadSessionStats,
   runDoctor,
   runDump,
   runUpdate,

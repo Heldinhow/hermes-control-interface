@@ -1139,6 +1139,11 @@ app.post('/api/gateway/:profile/:action', requireCsrf, async (req, res) => {
   }
 
   try {
+    // Check if service exists first
+    const exists = await shell(`systemctl list-unit-files ${svc}.service 2>&1`);
+    if (!exists.includes(svc)) {
+      return res.status(400).json({ ok: false, error: `Service ${svc} not installed. Run: bash scripts/setup-gateway-service.sh --profile ${profile} --user root` });
+    }
     const result = await shell(`systemctl ${action} ${svc} 2>&1`);
     const isActive = (await shell(`systemctl is-active ${svc} 2>/dev/null || echo inactive`)).trim() === 'active';
     res.json({ ok: true, profile, action, active: isActive, output: result.trim() });

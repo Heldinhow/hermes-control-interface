@@ -635,12 +635,13 @@ async function toggleGateway(profile, action) {
     });
     const data = await res.json();
     if (data.ok) {
+      showToast(`Gateway ${action}: ${profile}`, 'success');
       fetchSnapshot();
     } else {
-      console.error('Gateway toggle failed:', data);
+      showToast(`Gateway ${action} failed: ${data.error}`, 'error');
     }
   } catch (e) {
-    console.error('Gateway toggle error:', e);
+    showToast(`Gateway error: ${e.message}`, 'error');
   }
 }
 

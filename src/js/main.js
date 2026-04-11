@@ -1422,5 +1422,40 @@ function init() {
   checkAuth();
 }
 
+// ============================================
+// Export functions to window for onclick handlers
+// ============================================
+Object.assign(window, {
+  navigate,
+  toggleTheme,
+  loadHome,
+  loadAgents,
+  loadAgentDetail,
+  loadAgentSessions,
+  loadAgentGateway,
+  loadAgentConfig,
+  loadAgentMemory,
+  loadMonitor,
+  loadSkills,
+  loadMaintenance,
+  setAgentDefault,
+  resumeSession,
+  renameSession,
+  exportSession,
+  deleteSession,
+  gatewayAction,
+  loadGatewayLogs,
+  runDoctor,
+  runDump,
+  runUpdate,
+  showCreateUser,
+  createUser,
+  loadUsers,
+  loadAuth,
+  loadAudit,
+  showToast,
+  escapeHtml,
+});
+
 // Start
 init();

@@ -1074,8 +1074,12 @@ app.get('/api/auth/me', (req, res) => {
 
 // Check if first run (no rate limit, no auth required)
 app.get('/api/auth/status', (req, res) => {
-  const users = loadUsers();
-  res.json({ ok: true, first_run: users.length === 0, user_count: users.length });
+  try {
+    const users = listUsers();
+    res.json({ ok: true, first_run: users.length === 0, user_count: users.length });
+  } catch (e) {
+    res.json({ ok: true, first_run: true, user_count: 0 });
+  }
 });
 
 // First-run setup (create admin)

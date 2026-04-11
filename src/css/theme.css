@@ -68,14 +68,21 @@ html, body {
 
 body {
   background:
-    radial-gradient(circle at top left, color-mix(in oklab, #ffac02 8%, transparent) 0%, transparent 35%),
-    radial-gradient(circle at bottom right, color-mix(in oklab, #6aa9ff 6%, transparent) 0%, transparent 32%),
-    linear-gradient(180deg, var(--bg-base) 0%, color-mix(in oklab, var(--bg-base) 80%, #000) 100%);
+    radial-gradient(circle at top left, color-mix(in oklab, #ffac02 6%, transparent) 0%, transparent 30%),
+    radial-gradient(circle at bottom right, color-mix(in oklab, #6aa9ff 4%, transparent) 0%, transparent 28%),
+    var(--bg-base);
   color: var(--fg);
   font-family: var(--font);
   font-size: 13px;
   line-height: 1.5;
   overflow: hidden;
+}
+
+[data-theme="light"] body {
+  background:
+    radial-gradient(circle at top left, color-mix(in oklab, #170d02 3%, transparent) 0%, transparent 30%),
+    radial-gradient(circle at bottom right, color-mix(in oklab, #170d02 2%, transparent) 0%, transparent 28%),
+    var(--bg-base);
 }
 
 /* ============================================

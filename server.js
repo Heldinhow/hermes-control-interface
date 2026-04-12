@@ -251,12 +251,12 @@ function requireCsrf(req, res, next) {
 
 function setAuthCookie(res) {
   const token = createAuthToken();
-  res.setHeader('Set-Cookie', `${AUTH_COOKIE}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${24 * 60 * 60}; Secure`);
+  res.setHeader('Set-Cookie', `${AUTH_COOKIE}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${24 * 60 * 60}`);
   return token;
 }
 
 function clearAuthCookie(res) {
-  res.setHeader('Set-Cookie', `${AUTH_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0; Secure`);
+  res.setHeader('Set-Cookie', `${AUTH_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`);
 }
 
 function getClientIp(req) {
@@ -1100,7 +1100,7 @@ app.post('/api/auth/setup', loginRateLimiter, (req, res) => {
   if (!result.ok) return res.status(400).json(result);
 
   const authToken = createAuthToken(username, 'admin');
-  res.setHeader('Set-Cookie', `${AUTH_COOKIE}=${encodeURIComponent(authToken)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${24 * 60 * 60}; Secure`);
+  res.setHeader('Set-Cookie', `${AUTH_COOKIE}=${encodeURIComponent(authToken)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${24 * 60 * 60}`);
   audit(username, 'admin', 'SETUP', 'first-run admin created');
   addNotification('success', `Admin account created: ${username}`);
   const csrfToken = deriveCsrfToken(authToken);
@@ -1128,7 +1128,7 @@ app.post('/api/auth/login', loginRateLimiter, (req, res) => {
   }
 
   const authToken = createAuthToken(user.username, user.role);
-  res.setHeader('Set-Cookie', `${AUTH_COOKIE}=${encodeURIComponent(authToken)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${24 * 60 * 60}; Secure`);
+  res.setHeader('Set-Cookie', `${AUTH_COOKIE}=${encodeURIComponent(authToken)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${24 * 60 * 60}`);
   audit(user.username, user.role, 'LOGIN', `success from ${ip}`);
   const csrfToken = deriveCsrfToken(authToken);
   res.json({ ok: true, user: { username: user.username, role: user.role }, csrfToken });

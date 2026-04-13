@@ -7,35 +7,6 @@ A self-hosted web dashboard for the [Hermes AI agent](https://github.com/NousRes
 
 ---
 
-## Key Features
-
-### Skills Hub
-Browse, search, preview, and install skills from the official registry. Install to any agent profile with one click.
-
-![Skills Hub (dark)](docs/screenshots/dark/04-skills.png)
-
-### Agent Skills Management
-View installed skills per agent, update, uninstall, and check for updates — all from the agent detail page.
-
-![Agent Skills (dark)](docs/screenshots/dark/12-agent-skills.png)
-
-### Honcho Memory Panel
-Rich integration with [Honcho](https://github.com/plastic-labs/honcho) cross-session memory. Shows connection status, peer configuration, recall mode, and AI representation.
-
-![Memory (dark)](docs/screenshots/dark/11-agent-memory.png)
-
-### Gateway Connections
-Real platform data from `hermes status --all`. Per-platform connection status for Telegram, Discord, WhatsApp, Signal, and more.
-
-![Gateway (dark)](docs/screenshots/dark/09-agent-gateway.png)
-
-### Multi-Agent Management
-Manage multiple Hermes profiles from one dashboard. Each agent runs independently with its own gateway, config, skills, and cron jobs.
-
-![Agents (dark)](docs/screenshots/dark/02-agents.png)
-
----
-
 ## Screenshots
 
 ### Dark Mode

@@ -1,4 +1,5 @@
 require('dotenv').config();
+const https = require('https');
 const express = require('express');
 const helmet = require('helmet');
 const fs = require('fs');
@@ -2281,11 +2282,26 @@ app.post('/api/hermes-cron/:profile/:jobId/:action', requireCsrf, async (req, re
   }
 });
 
-const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Hermes Control Interface running on port ${PORT}`);
-  console.log('Password gate: env-secret only');
-  console.log(`Identity: root@hermes`);
-});
+const server = (() => {
+  const sslCert = process.env.HCI_SSL_CERT_FILE;
+  const sslKey = process.env.HCI_SSL_KEY_FILE;
+  if (sslCert && sslKey && fs.existsSync(sslCert) && fs.existsSync(sslKey)) {
+    const server = https.createServer({
+      cert: fs.readFileSync(sslCert),
+      key: fs.readFileSync(sslKey),
+    }, app);
+    server.listen(PORT, '0.0.0.0', () => {
+      console.log(`Hermes Control Interface running on https://0.0.0.0:${PORT}`);
+    });
+    return server;
+  }
+  const server = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Hermes Control Interface running on http://0.0.0.0:${PORT}`);
+    console.log('Password gate: env-secret only');
+    console.log(`Identity: root@hermes`);
+  });
+  return server;
+})();
 
 const wss = new WebSocketServer({
   server,

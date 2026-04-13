@@ -39,7 +39,7 @@ Commits: 17 (lokal, belum push)
 ## Phase 5.1: Pages ✅
 - [x] Home — System Health + Agent Overview + Gateways + Token Usage (7d)
 - [x] Agents — agent list + create/clone/delete
-- [x] Agent Detail — 5 tabs (Dashboard, Sessions, Gateway, Config, Memory)
+- [x] Agent Detail — 6 tabs (Dashboard, Sessions, Gateway, Config, Memory, Cron)
 - [x] Usage — full analytics (time range 1d/7d/30d/90d, agent filter, models/platforms/tools)
 - [x] Skills — installed skills list (parsed from `hermes skills list`)
 - [x] Maintenance — Doctor, Dump, Update, Users, Auth, Audit

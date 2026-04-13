@@ -131,6 +131,34 @@ kill $(lsof -t -i:10274) 2>/dev/null; sleep 1; nohup node server.js &>/dev/null 
 
 See `docs/SECURITY-AUDIT.md` for the full security audit report. Score: 7.2/10.
 
+## Screenshots
+
+### Home
+![Home](docs/screenshots/01-home.png)
+
+### Agents
+![Agents](docs/screenshots/02-agents.png)
+
+### Usage & Analytics
+![Usage](docs/screenshots/03-usage.png)
+
+### Skills Marketplace
+![Skills](docs/screenshots/04-skills.png)
+
+### Maintenance
+![Maintenance](docs/screenshots/05-maintenance.png)
+
+### File Explorer
+![Files](docs/screenshots/06-files.png)
+
+### Agent Detail
+![Agent Detail](docs/screenshots/07-agent-detail.png)
+
+### Cron Jobs
+![Cron](docs/screenshots/08-cron-tab.png)
+
+---
+
 ## License
 
 MIT

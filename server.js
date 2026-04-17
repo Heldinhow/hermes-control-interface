@@ -280,18 +280,63 @@ const events = [];
 
 // ── Gateway API Proxy (fast, structured events) ────────────────────
 const GATEWAY_API_KEY = process.env.GATEWAY_API_KEY || 'hci-gateway-2026';
+const HERMES_HOME = process.env.HERMES_HOME || path.join(os.homedir(), '.hermes');
 
-// Profile → Gateway API port mapping
-const GATEWAY_PORTS = {
-  default: 8642,
-  soci: 8643,
-  cuan: 8644,
-  david: 8645,
-};
+// Dynamic profile → Gateway API port discovery
+// Scans ~/.hermes/config.yaml (default) + ~/.hermes/profiles/*/config.yaml
+function discoverGatewayPorts() {
+  const ports = {};
+  try {
+    // Default profile: ~/.hermes/config.yaml
+    const defaultConf = fs.readFileSync(path.join(HERMES_HOME, 'config.yaml'), 'utf8');
+    const defaultCfg = yaml.load(defaultConf);
+    const ds = defaultCfg.platforms?.api_server;
+    if (ds?.enabled && ds?.extra?.port) {
+      ports['default'] = ds.extra.port;
+    }
+  } catch (_) { /* no default config */ }
+
+  // Other profiles: ~/.hermes/profiles/<name>/config.yaml
+  const profilesDir = path.join(HERMES_HOME, 'profiles');
+  try {
+    for (const name of fs.readdirSync(profilesDir)) {
+      try {
+        const confPath = path.join(profilesDir, name, 'config.yaml');
+        const raw = fs.readFileSync(confPath, 'utf8');
+        const cfg = yaml.load(raw);
+        const apiSrv = cfg.platforms?.api_server;
+        if (apiSrv?.enabled && apiSrv?.extra?.port) {
+          ports[name] = apiSrv.extra.port;
+        }
+      } catch (_) { /* skip broken config */ }
+    }
+  } catch (_) { /* no profiles dir */ }
+  return ports;
+}
+
+let gatewayPorts = discoverGatewayPorts();
+console.log('[Gateway] Discovered ports:', gatewayPorts);
+
+// Refresh on config changes (watch profiles dir)
+try {
+  fs.watch(path.join(HERMES_HOME, 'profiles'), { recursive: true }, (event, filename) => {
+    if (filename?.endsWith('config.yaml')) {
+      gatewayPorts = discoverGatewayPorts();
+      console.log('[Gateway] Ports refreshed:', gatewayPorts);
+    }
+  });
+} catch (_) { /* fs.watch not supported */ }
+
 function getGatewayBase(profile) {
-  const port = GATEWAY_PORTS[profile] || GATEWAY_PORTS.default;
+  const port = gatewayPorts[profile] || gatewayPorts['default'];
+  if (!port) return null; // no gateway api available
   return `http://127.0.0.1:${port}`;
 }
+
+// GET /api/gateway/ports — discovered gateway API ports per profile
+app.get('/api/gateway/ports', requireAuth, (req, res) => {
+  res.json({ ports: gatewayPorts, profiles: Object.keys(gatewayPorts) });
+});
 
 // POST /api/gateway/responses — start a new agent run via Gateway API
 app.post('/api/gateway/responses', requireAuth, requirePerm('chat.use'), async (req, res) => {
@@ -299,6 +344,10 @@ app.post('/api/gateway/responses', requireAuth, requirePerm('chat.use'), async (
   if (!message || typeof message !== 'string') return res.status(400).json({ error: 'message required' });
 
   try {
+    const gatewayBase = getGatewayBase(profile || 'default');
+    if (!gatewayBase) {
+      return res.status(503).json({ error: 'Gateway API not available for profile: ' + (profile || 'default') });
+    }
     const gatewayBody = {
       model: model || 'glm-5.1',
       input: message,
@@ -313,7 +362,7 @@ app.post('/api/gateway/responses', requireAuth, requirePerm('chat.use'), async (
       gwHeaders['X-Hermes-Session-Id'] = session_id;
     }
 
-    const gatewayRes = await fetch(`${getGatewayBase(profile || 'default')}/v1/responses`, {
+    const gatewayRes = await fetch(`${gatewayBase}/v1/responses`, {
       method: 'POST',
       headers: gwHeaders,
       body: JSON.stringify(gatewayBody),

@@ -16,6 +16,7 @@ const state = {
   notifFailCount: 0,
   _currentChatSession: null,
   chatSidebarOpen: localStorage.getItem('hci-chat-sidebar') !== 'false',
+  auditDisplayLimit: 15,
 };
 
 // ============================================
@@ -2844,9 +2845,9 @@ async function loadAuditLogPage() {
     const data = await res.json();
     const el = document.getElementById('audit-log-page');
     if (data.ok && data.entries) {
-      const recent = data.entries.slice(-50).reverse();
-      el.innerHTML = recent.map(e => {
-        // Parse: [2026-04-17T22:30:00Z] bayendor admin LOGIN success from 203.128.x.x
+      const limit = state.auditDisplayLimit;
+      const all = data.entries.slice(-limit).reverse();
+      let html = all.map(e => {
         const m = e.match(/\[(.+?)\]\s+(\S+)\s+(\S+)\s+(\S+)\s+(.+)/);
         if (m) {
           const [, ts, user, role, action, detail] = m;
@@ -2868,6 +2869,12 @@ async function loadAuditLogPage() {
         }
         return `<div style="font-size:11px;padding:4px 0;border-bottom:1px solid var(--border);color:var(--fg-muted);font-family:var(--font);">${escapeHtml(e)}</div>`;
       }).join('');
+      // Load more button
+      if (data.entries.length > limit) {
+        const remaining = data.entries.length - limit;
+        html += `<div style="padding:8px;text-align:center;"><button class="btn btn-ghost btn-sm" onclick="loadMoreAudit()" style="font-size:11px;">Load more (${remaining} remaining)</button></div>`;
+      }
+      el.innerHTML = html;
     } else {
       el.innerHTML = '<div class="stat-row"><span class="stat-label">No audit entries</span></div>';
     }
@@ -2875,6 +2882,11 @@ async function loadAuditLogPage() {
     document.getElementById('audit-log-page').innerHTML = `<div class="error-msg">${e.message}</div>`;
   }
 }
+
+window.loadMoreAudit = function() {
+  state.auditDisplayLimit += 15;
+  loadAuditLogPage();
+};
 
 async function loadMaintenance(container) {
   container.innerHTML = `

@@ -94,6 +94,11 @@ function updateUserMenu() {
   if (!state.user) return;
   document.getElementById('user-name').textContent = state.user.username;
   document.getElementById('user-role').textContent = state.user.role;
+  // Show User Management button for admin only
+  const btn = document.getElementById('users-mgmt-btn');
+  if (btn) {
+    btn.style.display = hasPerm('users.manage') ? 'block' : 'none';
+  }
 }
 
 // Login form
@@ -217,6 +222,9 @@ async function loadPage(page, params = {}) {
         break;
       case 'chat':
         await loadChat(container);
+        break;
+      case 'users':
+        await loadUsersPage(container);
         break;
       case 'logs':
         await loadLogs(container);
@@ -2778,6 +2786,74 @@ window.doInstallSkill = async function(skillName) {
   }
 }
 
+async function loadUsersPage(container) {
+  container.innerHTML = `
+    <div class="page-header">
+      <div>
+        <div class="page-title">User Management</div>
+        <div class="page-subtitle">Manage users, roles, and permissions</div>
+      </div>
+    </div>
+    <div class="card-grid">
+      <div class="card">
+        <div class="card-title">Users</div>
+        <div id="users-page-list"><div class="loading">Loading users...</div></div>
+        <div class="card-actions" style="margin-top:8px;">
+          <button class="btn btn-ghost" onclick="showCreateUser()">+ Create User</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">Audit Log</div>
+        <div id="audit-log-page"><div class="loading">Loading audit...</div></div>
+      </div>
+    </div>
+  `;
+
+  // Load users for the page
+  try {
+    const res = await api('/api/users');
+    const el = document.getElementById('users-page-list');
+    if (res.ok && res.users) {
+      el.innerHTML = res.users.map(u => {
+        const canManage = hasPerm('users.manage');
+        const permCount = u.permissions ? Object.values(u.permissions).filter(Boolean).length : 0;
+        const roleBadge = u.role === 'admin' ? '🟢' : u.role === 'viewer' ? '🔵' : '🟡';
+        return `<div class="stat-row">
+          <span class="stat-label">${roleBadge} ${u.username} <span class="badge">${u.role}</span> <span style="color:var(--fg-subtle);font-size:10px;">${permCount} perms</span></span>
+          <span class="stat-value" style="display:flex;gap:4px;align-items:center;">
+            ${u.last_login ? new Date(u.last_login).toLocaleDateString() : 'never'}
+            ${canManage ? `<button class="btn btn-ghost btn-sm" onclick="showEditUser('${u.username}')" title="Edit permissions">⚙</button>
+            ${res.users.length > 1 ? `<button class="btn btn-ghost btn-sm btn-danger" onclick="deleteUser('${u.username}')">✕</button>` : ''}` : ''}
+          </span>
+        </div>`;
+      }).join('');
+    } else {
+      el.innerHTML = '<div class="stat-row"><span class="stat-label">No users</span></div>';
+    }
+  } catch (e) {
+    document.getElementById('users-page-list').innerHTML = `<div class="error-msg">${e.message}</div>`;
+  }
+
+  // Load audit log for the page
+  loadAuditLogPage();
+}
+
+async function loadAuditLogPage() {
+  try {
+    const res = await fetch('/api/audit');
+    const data = await res.json();
+    const el = document.getElementById('audit-log-page');
+    if (data.ok && data.entries) {
+      const recent = data.entries.slice(-50).reverse();
+      el.innerHTML = recent.map(e => `<div style="font-size:11px;padding:4px 0;border-bottom:1px solid var(--border);color:var(--fg-muted);font-family:var(--font);">${escapeHtml(e)}</div>`).join('');
+    } else {
+      el.innerHTML = '<div class="stat-row"><span class="stat-label">No audit entries</span></div>';
+    }
+  } catch (e) {
+    document.getElementById('audit-log-page').innerHTML = `<div class="error-msg">${e.message}</div>`;
+  }
+}
+
 async function loadMaintenance(container) {
   container.innerHTML = `
     <div class="page-header">
@@ -3776,8 +3852,12 @@ function init() {
     document.getElementById('password-modal').style.display = 'flex';
   });
 
+  document.getElementById('users-mgmt-btn')?.addEventListener('click', () => {
+    document.getElementById('user-dropdown').style.display = 'none';
+    navigate('users');
+  });
+
   document.getElementById('password-cancel')?.addEventListener('click', () => {
-    document.getElementById('password-modal').style.display = 'none';
     document.getElementById('password-error').textContent = '';
   });
 

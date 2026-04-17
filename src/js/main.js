@@ -11,6 +11,7 @@ const state = {
   page: 'home',
   theme: localStorage.getItem('hci-theme') || 'dark',
   notifications: [],
+  notifDisplayLimit: 5,
   notifInterval: null,
   notifFailCount: 0,
   _currentChatSession: null,
@@ -3527,9 +3528,23 @@ async function fetchNotifications() {
   try {
     const res = await api('/api/notifications');
     if (res.ok && res.notifications) {
+      const prevUnread = state.notifications.filter((n) => !n.dismissed).length;
       state.notifications = res.notifications;
       state.notifFailCount = 0;
       updateNotifBadge();
+      // Re-render dropdown if it's open
+      const dropdown = document.getElementById('notif-dropdown');
+      if (dropdown && dropdown.style.display !== 'none') {
+        renderNotifications();
+      }
+      // Flash badge if new unread notifications arrived
+      const newUnread = state.notifications.filter((n) => !n.dismissed).length;
+      if (newUnread > prevUnread && badgeFlashTimeout) clearTimeout(badgeFlashTimeout);
+      const badge = document.getElementById('notif-badge');
+      if (badge && newUnread > prevUnread) {
+        badge.style.transform = 'scale(1.3)';
+        badgeFlashTimeout = setTimeout(() => { badge.style.transform = 'scale(1)'; }, 300);
+      }
     } else if (res.error === 'network' || res.error === 'rate-limited') {
       state.notifFailCount = (state.notifFailCount || 0) + 1;
       if (state.notifFailCount === 3 || state.notifFailCount === 6) startNotifPolling();
@@ -3539,6 +3554,8 @@ async function fetchNotifications() {
     if (state.notifFailCount === 3 || state.notifFailCount === 6) startNotifPolling();
   }
 }
+
+let badgeFlashTimeout;
 
 function updateNotifBadge() {
   const badge = document.getElementById('notif-badge');
@@ -3555,9 +3572,103 @@ function startNotifPolling() {
   if (state.notifInterval) clearInterval(state.notifInterval);
   fetchNotifications();
   const failCount = state.notifFailCount || 0;
-  const interval = failCount >= 6 ? 120000 : failCount >= 3 ? 60000 : 30000;
+  const interval = failCount >= 6 ? 120000 : failCount >= 3 ? 60000 : 15000;
   state.notifInterval = setInterval(fetchNotifications, interval);
 }
+
+// ============================================
+// Notification helpers (module-level so fetchNotifications can access them)
+// ============================================
+function notifColor(type) {
+  const colors = {
+    error: 'var(--coral, #ff6b6b)',
+    warning: 'var(--amber, #fbbf24)',
+    success: 'var(--green, #34d399)',
+    info: 'var(--teal, #4ecdc4)',
+  };
+  return colors[type] || colors.info;
+}
+
+function notifIcon(type) {
+  const icons = {
+    error: '🔴',
+    warning: '🟡',
+    success: '🟢',
+    info: '🔵',
+  };
+  return icons[type] || icons.info;
+}
+
+function renderNotifications() {
+  const listEl = document.getElementById('notif-list');
+  if (!listEl) return;
+  const limit = state.notifDisplayLimit;
+  const all = state.notifications.sort((a, b) => new Date(b.timestamp || 0) - new Date(a.timestamp || 0));
+  const shown = all.slice(0, limit);
+  if (shown.length === 0) {
+    listEl.innerHTML = '<div class="notif-empty">No notifications</div>';
+    return;
+  }
+  listEl.innerHTML = shown.map(n => {
+    const color = notifColor(n.type);
+    const icon = notifIcon(n.type);
+    return `
+      <div class="notif-item ${n.dismissed ? 'notif-read' : ''}" data-notif-id="${n.id || ''}" style="padding:8px;border-bottom:1px solid var(--border);font-size:11px;cursor:pointer;${n.dismissed ? 'opacity:0.5;' : ''}">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:6px;">
+          <div style="flex-shrink:0;">${icon}</div>
+          <div style="flex:1;color:${n.dismissed ? 'var(--fg-muted)' : 'var(--fg)'};">
+            <span style="color:${color};font-weight:600;font-size:10px;text-transform:uppercase;">${n.type || 'info'}</span><br>${escapeHtml(n.message || '')}
+          </div>
+          <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();dismissNotifItem('${n.id || ''}')" style="padding:2px 6px;font-size:10px;color:var(--fg-muted);" title="Dismiss">✕</button>
+        </div>
+        <div style="color:var(--fg-subtle);font-size:10px;margin-top:2px;margin-left:22px;">${n.timestamp ? new Date(n.timestamp).toLocaleString() : ''}</div>
+      </div>
+    `;
+  }).join('');
+
+  // Click to mark as read
+  listEl.querySelectorAll('.notif-item').forEach(el => {
+    el.addEventListener('click', () => {
+      const id = el.dataset.notifId;
+      if (id) markNotifRead(id);
+      el.style.opacity = '0.5';
+      el.classList.add('notif-read');
+    });
+  });
+
+  // Load more button
+  if (all.length > limit) {
+    listEl.innerHTML += `<div style="padding:8px;text-align:center;"><button class="btn btn-ghost btn-sm" onclick="loadMoreNotifs(${limit + 5})">Load more (${all.length - limit} remaining)</button></div>`;
+  }
+}
+
+window.loadMoreNotifs = function(newLimit) {
+  state.notifDisplayLimit = newLimit || 10;
+  renderNotifications();
+};
+
+window.markNotifRead = async function(id) {
+  const n = state.notifications.find(n => n.id === id);
+  if (n) n.dismissed = true;
+  updateNotifBadge();
+  try { await api('/api/notifications/dismiss', { method: 'POST', body: JSON.stringify({ id }) }); } catch {}
+};
+
+window.dismissNotifItem = async function(id) {
+  const idx = state.notifications.findIndex(n => n.id === id);
+  if (idx >= 0) { state.notifications[idx].dismissed = true; updateNotifBadge(); }
+  try { await api('/api/notifications/dismiss', { method: 'POST', body: JSON.stringify({ id }) }); } catch {}
+  state.notifDisplayLimit = Math.max(state.notifDisplayLimit, 5);
+  renderNotifications();
+};
+
+window.markAllNotifRead = async function() {
+  state.notifications.forEach(n => n.dismissed = true);
+  updateNotifBadge();
+  try { await api('/api/notifications/clear', { method: 'POST' }); } catch {}
+  state.notifDisplayLimit = 5;
+  renderNotifications();
+};
 
 // ============================================
 // API Helper
@@ -3705,78 +3816,18 @@ function init() {
     }
   });
 
-  // Notifications
+  // Notifications (functions defined at module level, see ~line 3580)
   document.getElementById('notif-btn')?.addEventListener('click', () => {
     const dropdown = document.getElementById('notif-dropdown');
     const isVisible = dropdown.style.display !== 'none';
     dropdown.style.display = isVisible ? 'none' : 'block';
-
     if (!isVisible) {
-      renderNotifications(5);
+      state.notifDisplayLimit = 5;
+      renderNotifications();
     }
   });
 
-  function renderNotifications(limit) {
-    const listEl = document.getElementById('notif-list');
-    const all = state.notifications.sort((a, b) => new Date(b.timestamp || 0) - new Date(a.timestamp || 0));
-    const shown = all.slice(0, limit || 5);
-    if (shown.length === 0) {
-      listEl.innerHTML = '<div class="notif-empty">No notifications</div>';
-    } else {
-      listEl.innerHTML = shown.map(n => `
-        <div class="notif-item ${n.dismissed ? 'notif-read' : ''}" data-notif-id="${n.id || ''}" style="padding:8px;border-bottom:1px solid var(--border);font-size:11px;cursor:pointer;${n.dismissed ? 'opacity:0.5;' : ''}">
-          <div style="display:flex;justify-content:space-between;align-items:flex-start;">
-            <div style="flex:1;color:${n.dismissed ? 'var(--fg-muted)' : 'var(--fg)'};">${escapeHtml(n.message || '')}</div>
-            <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();dismissNotifItem('${n.id || ''}')" style="padding:2px 6px;font-size:10px;" title="Dismiss">✕</button>
-          </div>
-          <div style="color:var(--fg-subtle);font-size:10px;margin-top:2px;">${n.timestamp ? new Date(n.timestamp).toLocaleString() : ''}</div>
-        </div>
-      `).join('');
-
-      // Click to mark as read
-      listEl.querySelectorAll('.notif-item').forEach(el => {
-        el.addEventListener('click', () => {
-          const id = el.dataset.notifId;
-          if (id) markNotifRead(id);
-          el.style.opacity = '0.5';
-          el.classList.add('notif-read');
-        });
-      });
-
-      // Load more button
-      if (all.length > limit) {
-        listEl.innerHTML += `<div style="padding:8px;text-align:center;"><button class="btn btn-ghost btn-sm" onclick="loadMoreNotifs(${limit + 5})">Load more (${all.length - limit} remaining)</button></div>`;
-      }
-    }
-  }
-
-  window.loadMoreNotifs = function(newLimit) {
-    renderNotifications(newLimit || 10);
-  };
-
-  window.markNotifRead = async function(id) {
-    const n = state.notifications.find(n => n.id === id);
-    if (n) n.dismissed = true;
-    updateNotifBadge();
-    try { await api('/api/notifications/dismiss', { method: 'POST', body: JSON.stringify({ id }) }); } catch {}
-  };
-
-  window.dismissNotifItem = async function(id) {
-    const idx = state.notifications.findIndex(n => n.id === id);
-    if (idx >= 0) { state.notifications[idx].dismissed = true; updateNotifBadge(); }
-    try { await api('/api/notifications/dismiss', { method: 'POST', body: JSON.stringify({ id }) }); } catch {}
-    renderNotifications(5);
-  };
-
-  window.markAllNotifRead = async function() {
-    state.notifications.forEach(n => n.dismissed = true);
-    updateNotifBadge();
-    try { await api('/api/notifications/clear', { method: 'POST' }); } catch {}
-    renderNotifications(5);
-  };
-
   document.getElementById('notif-clear')?.addEventListener('click', async () => {
-    // Mark all as read (dismissed but keep in list)
     await window.markAllNotifRead();
   });
 
@@ -4499,22 +4550,6 @@ function hasPerm(perm) {
 // Expose for onclick handlers in templates
 window.hasPerm = hasPerm;
 
-function dismissNotif(el, id) {
-  if (el) el.style.opacity = "0.4";
-  if (id) {
-    const idx = state.notifications.findIndex(n => n.id === id);
-    if (idx >= 0) { state.notifications[idx].dismissed = true; md(); }
-  }
-}
-
-function loadMoreNotifs() {
-  if (state._notifExtra) state._notifExtra += 10;
-  else state._notifExtra = 10;
-  md();
-}
-
-window.dismissNotif = dismissNotif;
-window.loadMoreNotifs = loadMoreNotifs;
 window.refreshLogs = refreshLogs;
 window.toggleLogsAuto = toggleLogsAuto;
 window.setLogsLevel = setLogsLevel;

@@ -13,6 +13,66 @@ const { WebSocketServer } = require('ws');
 const rateLimit = require('express-rate-limit');
 const yaml = require('js-yaml');
 
+// ── LLM Pricing (via @pydantic/genai-prices) ──
+const { calcPrice } = require('@pydantic/genai-prices');
+
+// Free models (no cost regardless of pricing data)
+const FREE_MODELS = new Set([
+  'xiaomi/mimo-v2-pro',
+  'mimo-v2-pro',
+]);
+
+// Hermes billing_provider → genai-prices providerId mapping
+const PROVIDER_MAP = {
+  'openrouter':    'openrouter',
+  'openai-codex':  'openai',
+  'opencode-go':   'openrouter', // minimax available via OpenRouter pricing
+};
+
+// Custom pricing for models not in genai-prices (per million tokens)
+const CUSTOM_PRICING = {
+  'minimax-m2':   { input_mtok: 0.30, output_mtok: 1.20, cache_read_mtok: 0.03 },
+  'minimax-m2.7': { input_mtok: 0.30, output_mtok: 1.20, cache_read_mtok: 0.03 },
+};
+
+// Calculate cost in USD from token counts
+function calculateCost(model, inputTokens, outputTokens, cacheReadTokens = 0, billingProvider) {
+  if (!model || FREE_MODELS.has(model)) return 0;
+
+  // genai-prices expects input_tokens = total input (including cache)
+  // Our DB stores input and cache separately, so combine them
+  const usage = {
+    input_tokens: inputTokens + cacheReadTokens,
+    output_tokens: outputTokens,
+    cache_read_tokens: cacheReadTokens,
+  };
+
+  // 1. Try with provider hint
+  const providerId = PROVIDER_MAP[billingProvider];
+  if (providerId) {
+    try {
+      const r = calcPrice(usage, model, { providerId });
+      if (r) return r.total_price;
+    } catch (_) { /* fallback to next */ }
+  }
+
+  // 2. Try without provider (match across all providers)
+  try {
+    const r = calcPrice(usage, model);
+    if (r) return r.total_price;
+  } catch (_) { /* fallback to custom pricing */ }
+
+  // 3. Custom pricing fallback
+  const custom = CUSTOM_PRICING[model];
+  if (custom) {
+    return (inputTokens / 1e6) * custom.input_mtok
+      + (outputTokens / 1e6) * custom.output_mtok
+      + (cacheReadTokens / 1e6) * (custom.cache_read_mtok || custom.input_mtok * 0.1);
+  }
+
+  return 0;
+}
+
 // Async shell execution utility (non-blocking)
 function shell(cmd, timeout = '8s') {
   return new Promise((resolve) => {
@@ -32,8 +92,10 @@ function execHermes(args, timeout = 30000) {
       encoding: 'utf8',
       maxBuffer: 64 * 1024,
       timeout,
-    }, (err, stdout) => {
-      resolve(err ? '' : stdout);
+    }, (err, stdout, stderr) => {
+      // stderr often contains real error messages hermes doesn't write to stdout
+      const output = err ? (stdout + '\n' + stderr) : stdout;
+      resolve(output);
     });
   });
 }
@@ -126,18 +188,183 @@ app.use(helmet({
       fontSrc: ["'self'", "https://fonts.gstatic.com"],
       imgSrc: ["'self'", "data:", "blob:", "https://portal.nousresearch.com"],
       connectSrc: ["'self'", "ws:", "wss:"],
+      upgradeInsecureRequests: null,
     },
   },
   hsts: false,
 }));
 
 app.use(express.json({ limit: '1mb' }));
-app.use(express.static(path.join(__dirname, 'dist')));
-app.use('/vendor/xterm', express.static(path.join(__dirname, 'node_modules/@xterm/xterm')));
-app.use('/vendor/xterm-addon-fit', express.static(path.join(__dirname, 'node_modules/@xterm/addon-fit')));
+// Vite-built assets have content hashes — safe to cache aggressively
+app.use(express.static(path.join(__dirname, 'dist'), {
+  maxAge: '365d',
+  immutable: true,
+  setHeaders: (res, filePath) => {
+    // HTML files should not be cached aggressively (they reference hashed assets)
+    if (filePath.endsWith('.html')) {
+      res.setHeader('Cache-Control', 'no-cache');
+    }
+  },
+}));
+app.use('/vendor/xterm', express.static(path.join(__dirname, 'node_modules/@xterm/xterm'), { maxAge: '30d' }));
+app.use('/vendor/xterm-addon-fit', express.static(path.join(__dirname, 'node_modules/@xterm/addon-fit'), { maxAge: '30d' }));
+
+// ── Plugin System ──
+// Scan ~/.hermes/skills/*/ui/manifest.json for plugin registrations
+function findPluginManifests() {
+  const skillsDir = path.join(os.homedir(), '.hermes', 'skills');
+  const manifests = [];
+  if (!fs.existsSync(skillsDir)) return manifests;
+  try {
+    const categories = fs.readdirSync(skillsDir);
+    for (const cat of categories) {
+      const catDir = path.join(skillsDir, cat);
+      if (!fs.statSync(catDir).isDirectory()) continue;
+      try {
+        const skills = fs.readdirSync(catDir);
+        for (const skill of skills) {
+          const manifestPath = path.join(catDir, skill, 'ui', 'manifest.json');
+          if (fs.existsSync(manifestPath)) {
+            try {
+              const plugin = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+              plugin.path = path.join(catDir, skill);
+              plugin.uiPath = path.join(catDir, skill, 'ui');
+              plugin.status = plugin.premium ? 'locked' : 'active';
+              manifests.push(plugin);
+            } catch (e) { log('plugin.parse', `Failed to parse ${manifestPath}: ${e.message}`); }
+          }
+        }
+      } catch {}
+    }
+  } catch {}
+  return manifests;
+}
+
+// List plugins API
+app.get('/api/plugins', requireRole('admin'), (req, res) => {
+  const plugins = findPluginManifests().map(p => ({
+    id: p.id,
+    name: p.name,
+    version: p.version,
+    description: p.description,
+    icon: p.icon || '📦',
+    pages: p.pages || [],
+    status: p.status,
+    premium: p.premium || false,
+    price: p.price || null,
+  }));
+  res.json({ ok: true, plugins });
+});
+
+// Serve plugin static files (UI assets)
+app.use('/plugins/:id', (req, res, next) => {
+  const plugins = findPluginManifests();
+  const plugin = plugins.find(p => p.id === req.params.id);
+  if (!plugin) return res.status(404).json({ error: 'plugin not found' });
+  if (plugin.status === 'locked') return res.status(402).json({ error: 'premium required', price: plugin.price });
+  express.static(plugin.uiPath, { maxAge: '1h' })(req, res, next);
+});
 
 const sessions = new Map();
 const events = [];
+
+// ── Chat System — uses real hermes sessions from state.db ──
+// No in-memory chat sessions — sidebar shows actual hermes sessions
+// Sending a message uses --resume with the real hermes session ID
+
+app.post('/api/chat/send', requireAuth, requirePerm('chat.use'), async (req, res) => {
+  const { message, profile, sessionId, model } = req.body || {};
+  if (!message || typeof message !== 'string') return res.status(400).json({ error: 'message required' });
+
+  const prof = sanitizeProfileName(profile) || 'default';
+
+  // Build hermes command
+  const escapedMsg = "'" + message.replace(/'/g, "'\\''") + "'";
+  const profileFlag = prof !== 'default' ? `-p ${prof}` : '';
+  const modelFlag = model ? `-m ${model}` : '';
+  // Resume existing session, or create new with empty --continue flag
+  const resumeFlag = sessionId ? `--resume ${sessionId}` : '--continue ""';
+  const fullCmd = `hermes chat -Q -q ${escapedMsg} ${profileFlag} ${modelFlag} ${resumeFlag} 2>&1`;
+
+  // SSE response
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+  });
+
+  const startTime = Date.now();
+  let fullResponse = '';
+
+  try {
+    const proc = spawn('bash', ['-lc', fullCmd], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, HERMES_HOME: path.join(os.homedir(), '.hermes') },
+    });
+
+    proc.stdout.on('data', (chunk) => {
+      const text = chunk.toString();
+      fullResponse += text;
+      // With -Q flag, output is clean — stream directly
+      const cleaned = text
+        .replace(/╭[═─╮][\s\S]*?╰[═─╯][^\n]*\n?/g, '') // safety: strip any remaining banners
+        .replace(/^Session:\s+\d+.*$/gm, '')
+        .replace(/^Resume this session with:.*$/gm, '')
+        .replace(/^Duration:.*$/gm, '')
+        .replace(/^Messages:.*$/gm, '')
+        .replace(/^Query:.*$/gm, '')
+        .replace(/^-{10,}$/gm, '')
+        .replace(/^Initializing agent.*$/gm, '');
+      if (cleaned.trim()) {
+        res.write(`data: ${JSON.stringify({ type: 'token', content: cleaned })}\n\n`);
+      }
+    });
+
+    proc.stderr.on('data', (chunk) => {
+      res.write(`data: ${JSON.stringify({ type: 'error', content: chunk.toString() })}\n\n`);
+    });
+
+    proc.on('close', () => {
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+      // Extract real hermes session ID from output
+      const sidMatch = fullResponse.match(/session_id:\s*([0-9]{8}_[0-9]{6}_[a-f0-9]+)/i)
+                   || fullResponse.match(/Session:\s+([0-9]{8}_[0-9]{6}_[a-f0-9]+)/i);
+      const newSessionId = sidMatch ? sidMatch[1] : sessionId || '';
+      res.write(`data: ${JSON.stringify({ type: 'done', sessionId: newSessionId, elapsed: parseFloat(elapsed) })}\n\n`);
+      res.end();
+    });
+  } catch (e) {
+    res.write(`data: ${JSON.stringify({ type: 'error', content: e.message })}\n\n`);
+    res.end();
+  }
+});
+
+// ── Model Info — read from config.yaml ──
+app.get('/api/models', requireAuth, async (req, res) => {
+  try {
+    const configPath = path.join(os.homedir(), '.hermes', 'config.yaml');
+    const configContent = await fs.promises.readFile(configPath, 'utf-8');
+    const config = yaml.load(configContent) || {};
+    
+    const modelConfig = config.model || {};
+    const defaultModel = modelConfig.default || 'unknown';
+    const provider = modelConfig.provider || 'unknown';
+    
+    // Return single model info (hermes doesn't expose full model list via CLI)
+    res.json({
+      ok: true,
+      default: defaultModel,
+      provider: provider,
+      groups: [{
+        provider: provider,
+        models: [defaultModel]
+      }]
+    });
+  } catch (e) {
+    res.json({ ok: false, error: e.message, groups: [], default: 'auto' });
+  }
+});
+
 // Log streaming state
 let logStream = { proc: null, type: null, level: null, clients: new Set() };
 let hermesSidebarSessionsCache = { at: 0, data: [] };
@@ -286,8 +513,14 @@ function requireAuth(req, res, next) {
 
 function requireCsrf(req, res, next) {
   if (!isAuthed(req)) return res.status(401).json({ error: 'authentication required' });
-  if (verifyCsrfToken(req)) return next();
-  return res.status(403).json({ error: 'invalid CSRF token' });
+  const headerToken = req.headers['x-csrf-token'];
+  if (!headerToken) { console.error('[CSRF-DEBUG] PUT cron/edit missing header token'); return res.status(403).json({ error: 'invalid CSRF token' }); }
+  const cookies = parseCookies(req);
+  const authToken = cookies[AUTH_COOKIE];
+  if (!authToken) { console.error('[CSRF-DEBUG] PUT cron/edit missing auth cookie'); return res.status(403).json({ error: 'invalid CSRF token' }); }
+  const expected = deriveCsrfToken(authToken);
+  if (!safeTimingEqual(headerToken, expected)) { console.error('[CSRF-DEBUG] PUT cron/edit token mismatch, got:', headerToken.substring(0,20), 'expected:', expected.substring(0,20)); return res.status(403).json({ error: 'invalid CSRF token' }); }
+  return next();
 }
 
 // (setAuthCookie and clearAuthCookie defined above at L37/L40)
@@ -312,6 +545,19 @@ const loginRateLimiter = rateLimit({
     });
   },
   standardHeaders: true, // Return rate limit info in `RateLimit-*` headers
+  legacyHeaders: false,
+});
+
+// Terminal exec rate limiter — 30 commands/minute per IP
+const terminalRateLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 30, // 30 commands per minute per IP
+  keyGenerator: (req) => getClientIp(req),
+  handler: (req, res) => {
+    log('terminal.rate_limited', `ip ${getClientIp(req)}`);
+    res.status(429).json({ ok: false, error: 'too many terminal commands, slow down' });
+  },
+  standardHeaders: true,
   legacyHeaders: false,
 });
 
@@ -799,6 +1045,27 @@ async function getAllSessions(profile) {
   const raw = await shell(cmd);
   if (raw) {
     const data = parseHermesSessionsList(raw);
+    // Enrich with message counts from state.db
+    try {
+      const stateDbPath = profile && profile !== 'default'
+        ? path.join(os.homedir(), '.hermes', 'profiles', profile, 'state.db')
+        : STATE_DB_PATH;
+      if (fs.existsSync(stateDbPath)) {
+        const db = new Database(stateDbPath, { readonly: true });
+        try {
+          const counts = db.prepare('SELECT id, message_count, title FROM sessions').all();
+          const countMap = {};
+          for (const c of counts) countMap[c.id] = { message_count: c.message_count || 0, dbTitle: c.title };
+          for (const s of data) {
+            const info = countMap[s.id];
+            if (info) {
+              s.messageCount = info.message_count;
+              if ((!s.title || s.title === '—') && info.dbTitle) s.title = info.dbTitle;
+            }
+          }
+        } finally { db.close(); }
+      }
+    } catch {}
     hermesAllSessionsCache = { at: now, data, key: cacheKey };
     return data;
   }
@@ -1116,25 +1383,28 @@ app.get('/api/session', (req, res) => {
 const {
   isFirstRun, findUser, createUser, deleteUser,
   verifyUserPassword, changePassword, resetUserPassword, sanitizeUsername, listUsers,
+  updateUserPermissions, PERMISSIONS, PRESET_PERMISSIONS, resolvePermissions,
   audit, getAuditLog,
   loadNotifications, addNotification, dismissNotification, clearNotifications,
 } = require('./auth');
 
+// Periodic cleanup of expired auth tokens (every 15 minutes)
+setInterval(() => {
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  for (const [k] of tokenToUser) {
+    const [t] = k.split('.');
+    if (Number(t) < cutoff) tokenToUser.delete(k);
+  }
+}, 15 * 60 * 1000);
+
 // Track current user in request (bound to token)
 const tokenToUser = new Map(); // token -> { username, role }
 
-function createAuthToken(username, role) {
+function createAuthToken(username, role, permissions) {
   const ts = String(Date.now());
   const sig = hmac(ts + ':' + username);
   const token = ts + '.' + sig;
-  tokenToUser.set(token, { username, role });
-  // Clean old tokens periodically
-  if (tokenToUser.size > 100) {
-    for (const [k] of tokenToUser) {
-      const [t] = k.split('.');
-      if (Date.now() - Number(t) > 24 * 60 * 60 * 1000) tokenToUser.delete(k);
-    }
-  }
+  tokenToUser.set(token, { username, role, permissions });
   return token;
 }
 
@@ -1158,6 +1428,24 @@ function requireRole(role) {
   };
 }
 
+// Permission-based access control
+function requirePerm(...perms) {
+  return (req, res, next) => {
+    const user = getCurrentUser(req);
+    if (!user) return res.status(401).json({ error: 'authentication required' });
+    // Admin always has access
+    if (user.role === 'admin') { req.hciUser = user; return next(); }
+    const userPerms = user.permissions || {};
+    const hasAll = perms.every(p => userPerms[p]);
+    if (!hasAll) {
+      audit(user.username, user.role, 'DENIED', `${req.method} ${req.path} (need: ${perms.join(',')})`);
+      return res.status(403).json({ error: `permission required: ${perms.join(', ')}` });
+    }
+    req.hciUser = user;
+    next();
+  };
+}
+
 // verifyPassword removed — use verifyUserPassword from user store
 
 // ============================================
@@ -1170,7 +1458,7 @@ app.get('/api/auth/me', (req, res) => {
   if (!user) return res.status(401).json({ ok: false });
   const cookies = parseCookies(req);
   const csrfToken = deriveCsrfToken(cookies[AUTH_COOKIE]);
-  res.json({ ok: true, user: { username: user.username, role: user.role }, csrfToken });
+  res.json({ ok: true, user: { username: user.username, role: user.role, permissions: user.permissions }, csrfToken });
 });
 
 // Check if first run (no rate limit, no auth required)
@@ -1201,7 +1489,7 @@ app.post('/api/auth/setup', loginRateLimiter, (req, res) => {
   const result = createUser(username, password, 'admin');
   if (!result.ok) return res.status(400).json(result);
 
-  const authToken = createAuthToken(username, 'admin');
+  const authToken = createAuthToken(username, 'admin', PRESET_PERMISSIONS.admin);
   setAuthCookie(res, authToken);
   audit(username, 'admin', 'SETUP', 'first-run admin created');
   addNotification('success', `Admin account created: ${username}`);
@@ -1232,11 +1520,11 @@ app.post('/api/auth/login', loginRateLimiter, (req, res) => {
     return res.status(401).json({ ok: false, error: 'Invalid username or password' });
   }
 
-  const authToken = createAuthToken(user.username, user.role);
+  const authToken = createAuthToken(user.username, user.role, user.permissions);
   setAuthCookie(res, authToken);
   audit(user.username, user.role, 'LOGIN', `success from ${ip}`);
   const csrfToken = deriveCsrfToken(authToken);
-  res.json({ ok: true, user: { username: user.username, role: user.role }, csrfToken });
+  res.json({ ok: true, user: { username: user.username, role: user.role, permissions: user.permissions }, csrfToken });
 });
 
 // Logout
@@ -1273,7 +1561,7 @@ app.get('/api/users', requireRole('admin'), (req, res) => {
 
 // Create user
 app.post('/api/users', requireRole('admin'), (req, res) => {
-  const { username, password, role } = req.body || {};
+  const { username, password, role, permissions } = req.body || {};
   if (!username || !password) {
     return res.status(400).json({ ok: false, error: 'Username and password required' });
   }
@@ -1283,11 +1571,25 @@ app.post('/api/users', requireRole('admin'), (req, res) => {
   if (password.length < 8) {
     return res.status(400).json({ ok: false, error: 'Password must be at least 8 characters' });
   }
-  const userRole = role === 'admin' ? 'admin' : 'viewer';
-  const result = createUser(username, password, userRole);
+  const userRole = ['admin', 'viewer', 'custom'].includes(role) ? role : 'viewer';
+  const result = createUser(username, password, userRole, userRole === 'custom' ? permissions : null);
   if (!result.ok) return res.status(400).json(result);
   addNotification('success', `User created: ${username} (${userRole})`);
   res.json({ ok: true });
+});
+
+// Update user permissions
+app.put('/api/users/:username', requireRole('admin'), (req, res) => {
+  const { role, permissions } = req.body || {};
+  const userRole = ['admin', 'viewer', 'custom'].includes(role) ? role : 'viewer';
+  const result = updateUserPermissions(req.params.username, userRole, userRole === 'custom' ? permissions : null);
+  if (!result.ok) return res.status(400).json(result);
+  res.json({ ok: true });
+});
+
+// List available permissions and presets
+app.get('/api/permissions', requireAuth, (req, res) => {
+  res.json({ ok: true, permissions: PERMISSIONS, presets: PRESET_PERMISSIONS });
 });
 
 // Delete user
@@ -1328,8 +1630,16 @@ app.get('/api/notifications', requireAuth, (req, res) => {
   res.json({ ok: true, notifications: notifs });
 });
 
+// Support both /api/notifications/:id/dismiss (URL param) and /api/notifications/dismiss (body id)
 app.post('/api/notifications/:id/dismiss', requireAuth, (req, res) => {
-  dismissNotification(req.params.id);
+  const id = req.params.id || req.body?.id;
+  if (id) dismissNotification(id);
+  res.json({ ok: true });
+});
+
+app.post('/api/notifications/dismiss', requireAuth, (req, res) => {
+  const id = req.body?.id;
+  if (id) dismissNotification(id);
   res.json({ ok: true });
 });
 
@@ -1364,6 +1674,8 @@ app.get('/api/system/health', requireAuth, async (req, res) => {
       disk: disk.trim() || 'N/A',
       uptime,
       hermes_version: version.trim() || 'N/A',
+      hci_version: require('./package.json').version,
+      node_version: process.version,
       agents: Math.max(0, parseInt(agents.trim()) - 2) || 0, // subtract header lines
       sessions: Math.max(0, parseInt(sessions.trim()) - 2) || 0,
     });
@@ -1460,12 +1772,29 @@ app.get('/api/all-sessions', requireAuth, async (req, res) => {
 
 function parseHermesProfileList(raw) {
   const lines = String(raw || '').split(/\r?\n/).map((l) => l.trimEnd()).filter(Boolean);
-  // First line is header, second is separator — skip both, parse from line 3 onward
-  const dataLines = lines.slice(2);
+  // Find the header row dynamically by looking for "Profile" followed by "Model" and "Gateway"
+  let headerIndex = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (/profile\s+model\s+gateway/i.test(lines[i])) {
+      headerIndex = i;
+      break;
+    }
+  }
+  if (headerIndex === -1) return [];
+  // Skip header, separator, and any lines containing python-dotenv warnings
+  const dataLines = [];
+  for (let i = headerIndex + 2; i < lines.length; i++) {
+    const line = lines[i];
+    // Skip separator line (box-drawing dashes)
+    if (/^[\s─▪▫·∙¤]+$/.test(line)) continue;
+    // Skip any lines containing python-dotenv warnings as extra safety
+    if (line.toLowerCase().includes('python-dotenv')) continue;
+    dataLines.push(line);
+  }
   const profiles = [];
   for (const line of dataLines) {
     const active = line.includes('◆');
-    const cleaned = line.replace(/[◆\s]+$/, '').replace(/\s*◆\s*/, '').trim();
+    const cleaned = line.replace(/[◆]+$/, '').replace(/\s*◆\s*/, '').trimEnd();
     const parts = cleaned.split(/\s{2,}/).map((p) => p.trim()).filter(Boolean);
     if (parts.length < 3) continue;
     profiles.push({
@@ -1498,7 +1827,7 @@ app.get('/api/profiles', requireAuth, async (req, res) => {
   res.json({ ok: true, profiles });
 });
 
-app.post('/api/profiles/use', requireCsrf, async (req, res) => {
+app.post('/api/profiles/use', requireRole('admin'), async (req, res) => {
   const name = sanitizeProfileName(req.body?.profile);
   if (!name) return res.status(400).json({ error: 'invalid profile name (allowed: a-z, A-Z, 0-9, _, -)' });
   try {
@@ -1640,6 +1969,108 @@ app.get('/api/gateway/:profile/logs', requireAuth, async (req, res) => {
   }
 });
 
+// Unified Logs — all profiles, all sources, with filters
+app.get('/api/logs', requireAuth, requirePerm('logs.view'), async (req, res) => {
+  try {
+    const profile = String(req.query.profile || 'all');
+    const source = String(req.query.source || 'all'); // agent, error, gateway
+    const lines = Math.min(parseInt(req.query.lines || '200', 10), 1000);
+    const level = String(req.query.level || '').toLowerCase(); // error, warn, info, debug
+    const search = String(req.query.search || '').toLowerCase();
+
+    const profiles = profile === 'all'
+      ? ['default', ...fs.readdirSync(path.join(os.homedir(), '.hermes', 'profiles')).filter(d => {
+          try { return fs.statSync(path.join(os.homedir(), '.hermes', 'profiles', d)).isDirectory(); } catch { return false; }
+        })]
+      : [sanitizeProfileName(profile)].filter(Boolean);
+
+    const sources = source === 'all' ? ['agent', 'error'] : [source];
+
+    let allLines = [];
+
+    for (const prof of profiles) {
+      const logBase = prof === 'default'
+        ? path.join(os.homedir(), '.hermes', 'logs')
+        : path.join(os.homedir(), '.hermes', 'profiles', prof, 'logs');
+
+      for (const src of sources) {
+        if (src === 'gateway') {
+          // Gateway logs from journalctl
+          const svc = prof === 'default' ? 'hermes-gateway' : `hermes-gateway-${prof}`;
+          const raw = await shell(`journalctl ${SYSTEMD_USER_FLAG} -u ${svc} --no-pager -n ${lines} 2>&1`, '10s');
+          for (const line of raw.split('\n').filter(Boolean)) {
+            allLines.push(parseLogLine(line, prof, 'gateway'));
+          }
+        } else {
+          const logFile = path.join(logBase, `${src}.log`);
+          if (fs.existsSync(logFile)) {
+            const raw = await shell(`tail -n ${lines} "${logFile}" 2>/dev/null`, '5s');
+            for (const line of raw.split('\n').filter(Boolean)) {
+              allLines.push(parseLogLine(line, prof, src));
+            }
+          }
+        }
+      }
+    }
+
+    // Sort by timestamp descending (newest first)
+    allLines.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+
+    // Apply level filter
+    if (level) {
+      allLines = allLines.filter(l => l.level === level);
+    }
+
+    // Apply search filter
+    if (search) {
+      allLines = allLines.filter(l => l.raw.toLowerCase().includes(search));
+    }
+
+    // Limit total
+    allLines = allLines.slice(0, lines);
+
+    res.json({ ok: true, count: allLines.length, logs: allLines });
+  } catch (e) {
+    res.json({ ok: false, error: e.message, logs: [] });
+  }
+});
+
+// Parse a log line into structured format
+function parseLogLine(line, profile, source) {
+  // Try to extract: [TIMESTAMP] [LEVEL] [COMPONENT] message
+  const match = line.match(/^\[([^\]]+)\]\s*\[([^\]]+)\]\s*(?:\[([^\]]+)\]\s*)?(.+)$/);
+  if (match) {
+    const [, ts, lvl, comp, msg] = match;
+    return {
+      ts: new Date(ts).getTime() || 0,
+      timestamp: ts,
+      level: lvl.toLowerCase(),
+      component: comp || source,
+      profile,
+      source,
+      message: msg.trim(),
+      raw: line,
+    };
+  }
+  // Fallback: journalctl format or plain line
+  // Try to detect level from content
+  let level = 'info';
+  if (/error|fail|fatal|crash/i.test(line)) level = 'error';
+  else if (/warn/i.test(line)) level = 'warn';
+  else if (/debug/i.test(line)) level = 'debug';
+
+  return {
+    ts: 0,
+    timestamp: '',
+    level,
+    component: source,
+    profile,
+    source,
+    message: line.trim(),
+    raw: line,
+  };
+}
+
 app.get('/api/explorer', requireAuth, (req, res) => {
   const roots = String(req.query.root || '');
   if (roots) {
@@ -1740,7 +2171,7 @@ app.post('/api/terminal/ensure', requireAuth, (req, res) => {
   }
 });
 
-app.post('/api/terminal/exec', requireCsrf, async (req, res) => {
+app.post('/api/terminal/exec', terminalRateLimiter, requireAuth, requireCsrf, requirePerm('terminal.exec'), async (req, res) => {
   const command = String(req.body?.command || '').trim();
   if (!command) return res.status(400).json({ error: 'command required' });
   if (command.length > 4096) return res.status(400).json({ error: 'command too long (max 4096 chars)' });
@@ -1778,7 +2209,7 @@ app.post('/api/terminal/exec', requireCsrf, async (req, res) => {
   }
 });
 
-app.post('/api/chat', requireCsrf, async (req, res) => {
+app.post('/api/chat', requireAuth, requireCsrf, requirePerm('chat.use'), async (req, res) => {
   const { message, sessionId = 'control-ui' } = req.body || {};
   if (!message || typeof message !== 'string') return res.status(400).json({ error: 'message required' });
   const history = sessions.get(sessionId) || [];
@@ -1828,7 +2259,7 @@ function addCronJob({ schedule, note, source = '/cron add' }) {
   return job;
 }
 
-app.post('/api/cron/:action', requireCsrf, async (req, res) => {
+app.post('/api/cron/:action', requireAuth, requireCsrf, requirePerm('cron.manage'), async (req, res) => {
   try {
     const result = await handleCronAction(req.params.action, req.body || {}, req.query || {}, '/api/cron');
     return res.json(result);
@@ -1853,11 +2284,11 @@ app.get('/usage', requireAuth, (req, res) => {
   res.json(buildUsageSummary());
 });
 
-app.get('/api/usage', requireAuth, (req, res) => {
+app.get('/api/usage', requireAuth, requirePerm('usage.view'), (req, res) => {
   res.json(buildUsageSummary());
 });
 
-app.get('/api/insights', requireAuth, async (req, res) => {
+app.get('/api/insights', requireAuth, requirePerm('usage.view'), async (req, res) => {
   const days = Math.min(365, Math.max(1, parseInt(req.query.days) || 7));
   const source = String(req.query.source || '').trim();
   const data = await getInsights(days, source);
@@ -1961,6 +2392,36 @@ app.get('/api/health', (req, res) => {
   res.json({ ok: true, title: 'Hermes Control Interface', auth: true, ws: '/ws' });
 });
 
+// HCI Update — git pull + npm install + build + auto-restart
+app.post('/api/hci/update', requireRole('admin'), async (req, res) => {
+  const HCI_DIR = path.join(__dirname);
+  const steps = [
+    { name: 'git pull', cmd: `cd ${HCI_DIR} && git pull --ff-only 2>&1` },
+    { name: 'npm install', cmd: `cd ${HCI_DIR} && npm install 2>&1` },
+    { name: 'build', cmd: `cd ${HCI_DIR} && npm run build 2>&1` },
+  ];
+  const log = [];
+  try {
+    for (const step of steps) {
+      log.push(`▸ ${step.name}...`);
+      const out = await shell(step.cmd, '60s');
+      log.push(out.trim() || '(no output)');
+      if (out.includes('error') || out.includes('ERROR') || out.includes('fatal')) {
+        throw new Error(`${step.name} failed`);
+      }
+    }
+    log.push('▸ Update complete. Restarting in 3s...');
+    res.json({ ok: true, log: log.join('\n') });
+    // Restart: spawn delayed exit
+    setTimeout(() => {
+      console.log('[HCI] Update applied, restarting...');
+      process.exit(0); // restart.sh wrapper will pick this up
+    }, 3000);
+  } catch (e) {
+    res.json({ ok: false, error: e.message, log: log.join('\n') });
+  }
+});
+
 // ============================================
 // Missing API Endpoints
 // ============================================
@@ -2033,7 +2494,226 @@ app.get('/api/config/:profile', requireAuth, async (req, res) => {
     // Parse YAML
     const yaml = require('yaml');
     const config = yaml.parse(raw) || {};
-    res.json({ ok: true, config });
+    // Also return raw YAML for diff/preview
+    res.json({ ok: true, config, raw_yaml: raw });
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
+// Config update (save)
+app.put('/api/config/:profile', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const profile = sanitizeProfileName(req.params.profile);
+    if (!profile) return res.status(400).json({ ok: false, error: 'invalid profile name' });
+    const home = profile === 'default' ? `${process.env.HOME}/.hermes` : `${process.env.HOME}/.hermes/profiles/${profile}`;
+    const configPath = `${home}/config.yaml`;
+
+    // Validate input is an object
+    const newConfig = req.body?.config;
+    if (!newConfig || typeof newConfig !== 'object' || Array.isArray(newConfig)) {
+      return res.status(400).json({ ok: false, error: 'config must be a non-array object' });
+    }
+
+    // Backup current config
+    const backupPath = `${configPath}.bak.${Date.now()}`;
+    await shell(`cp "${configPath}" "${backupPath}" 2>/dev/null || true`);
+
+    // Convert to YAML with good formatting
+    const yaml = require('yaml');
+    const doc = new yaml.Document(newConfig);
+    doc.commentBefore = ' Managed by Hermes Control Interface';
+    const yamlStr = doc.toString();
+
+    // Validate by parsing back
+    const parsed = yaml.parse(yamlStr);
+    if (!parsed || typeof parsed !== 'object') {
+      return res.status(400).json({ ok: false, error: 'Generated YAML is invalid' });
+    }
+
+    // Write
+    fs.writeFileSync(configPath, yamlStr + '\n');
+
+    audit(req.hciUser?.username || 'unknown', req.hciUser?.role || 'unknown', 'CONFIG_UPDATE', profile);
+    res.json({ ok: true, backup: backupPath });
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
+// Key metadata: category, description, provider URL, advanced flag
+const KEY_METADATA = {
+  // LLM Providers
+  OPENROUTER_API_KEY:      { cat: 'LLM Providers',    desc: 'OpenRouter API key',           url: 'https://openrouter.ai/keys',       adv: false },
+  OPENAI_API_KEY:          { cat: 'LLM Providers',    desc: 'OpenAI API key',               url: 'https://platform.openai.com/api-keys', adv: false },
+  ANTHROPIC_API_KEY:       { cat: 'LLM Providers',    desc: 'Anthropic API key',            url: 'https://console.anthropic.com/settings/keys', adv: false },
+  DEEPSEEK_API_KEY:        { cat: 'LLM Providers',    desc: 'DeepSeek API key',              url: 'https://platform.deepseek.com/api-keys', adv: false },
+  GEMINI_API_KEY:          { cat: 'LLM Providers',    desc: 'Google Gemini API key',         url: 'https://aistudio.google.com/app/apikey', adv: false },
+  GROQ_API_KEY:            { cat: 'LLM Providers',    desc: 'Groq API key',                  url: 'https://console.groq.com/keys',     adv: false },
+  MISTRAL_API_KEY:         { cat: 'LLM Providers',    desc: 'Mistral API key',               url: 'https://console.mistral.ai/api/',    adv: false },
+  TOGETHER_API_KEY:        { cat: 'LLM Providers',    desc: 'Together AI API key',           url: 'https://api.together.xyz/settings/api-keys', adv: false },
+  OPENAI_BASE_URL:         { cat: 'LLM Providers',    desc: 'OpenAI-compatible base URL',    url: '',  adv: false },
+  ANTHROPIC_BASE_URL:      { cat: 'LLM Providers',    desc: 'Anthropic base URL',            url: '',  adv: true },
+  DEEPSEEK_BASE_URL:       { cat: 'LLM Providers',    desc: 'DeepSeek base URL',             url: '',  adv: true },
+  LLM_MODEL:               { cat: 'LLM Providers',    desc: 'Default LLM model',             url: '',  adv: false },
+  LLM_PROVIDER:            { cat: 'LLM Providers',    desc: 'Default LLM provider',          url: '',  adv: false },
+  // Tool APIs
+  BROWSERBASE_API_KEY:     { cat: 'Tool APIs',        desc: 'Browserbase API key (web scraping)', url: 'https://browserbase.com',  adv: false },
+  BROWSERBASE_API_SECRET:  { cat: 'Tool APIs',        desc: 'Browserbase API secret',         url: 'https://browserbase.com',  adv: true },
+  FIRECRAWL_API_KEY:       { cat: 'Tool APIs',        desc: 'Firecrawl API key (web scraping)', url: 'https://firecrawl.dev', adv: false },
+  TAVILY_API_KEY:          { cat: 'Tool APIs',        desc: 'Tavily API key (web search)',   url: 'https://app.tavily.com',    adv: false },
+  ELEVENLABS_API_KEY:      { cat: 'Tool APIs',        desc: 'ElevenLabs API key (TTS)',     url: 'https://elevenlabs.io/api',  adv: false },
+  HUGGINGFACE_API_KEY:     { cat: 'Tool APIs',        desc: 'HuggingFace API key',          url: 'https://huggingface.co/settings/inference', adv: false },
+  // Messaging Platforms
+  TELEGRAM_BOT_TOKEN:      { cat: 'Messaging Platforms', desc: 'Telegram bot token',         url: 'https://t.me/BotFather',    adv: false },
+  DISCORD_BOT_TOKEN:       { cat: 'Messaging Platforms', desc: 'Discord bot token',           url: 'https://discord.com/developers/applications', adv: false },
+  SLACK_BOT_TOKEN:         { cat: 'Messaging Platforms', desc: 'Slack bot token (xoxb)',      url: 'https://api.slack.com/apps', adv: false },
+  WHATSAPP_SESSION_PATH:   { cat: 'Messaging Platforms', desc: 'WhatsApp session file path', url: '',  adv: false },
+  // Agent Settings
+  HERMES_CONTROL_PASSWORD:  { cat: 'Agent Settings',   desc: 'HCI control password',         url: '',  adv: false },
+  HERMES_CONTROL_SECRET:   { cat: 'Agent Settings',   desc: 'HCI control secret',           url: '',  adv: true },
+  API_SERVER_ENABLED:      { cat: 'Agent Settings',   desc: 'Enable API server',             url: '',  adv: false },
+  API_SERVER_PORT:         { cat: 'Agent Settings',   desc: 'API server port',               url: '',  adv: true },
+  WEBHOOK_SECRET:          { cat: 'Agent Settings',   desc: 'Webhook verification secret',   url: '',  adv: true },
+  // MCP Keys (match by prefix)
+  _MCP_KEYS_PREFIX: ['MCP_'],
+};
+
+function getKeyMeta(name) {
+  if (KEY_METADATA[name]) return KEY_METADATA[name];
+  // Prefix matching for MCP_*
+  if (name.startsWith('MCP_')) return { cat: 'MCP Keys', desc: `MCP configuration: ${name}`, url: '', adv: true };
+  // If it looks like an API key
+  if (/_API_KEY$|_KEY$|_TOKEN$|_SECRET$|_PASSWORD$/i.test(name)) {
+    return { cat: 'Advanced', desc: name, url: '', adv: true };
+  }
+  return { cat: 'Advanced', desc: name, url: '', adv: true };
+}
+
+// Keys (secrets) — list keys from .env with category metadata
+app.get('/api/keys/:profile', requireAuth, async (req, res) => {
+  try {
+    const profile = sanitizeProfileName(req.params.profile);
+    if (!profile) return res.status(400).json({ ok: false, error: 'invalid profile name' });
+    const home = profile === 'default' ? `${process.env.HOME}/.hermes` : `${process.env.HOME}/.hermes/profiles/${profile}`;
+    const envPath = `${home}/.env`;
+    const raw = await shell(`cat "${envPath}" 2>/dev/null || echo ""`);
+    if (!raw.trim()) {
+      return res.json({ ok: true, keys: [], categories: [] });
+    }
+    const keys = [];
+    for (const line of raw.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eqIdx = trimmed.indexOf('=');
+      if (eqIdx === -1) continue;
+      const name = trimmed.substring(0, eqIdx).trim();
+      const value = trimmed.substring(eqIdx + 1).trim();
+      const masked = value.length > 4
+        ? value.substring(0, 2) + '•'.repeat(Math.min(value.length - 4, 20)) + value.substring(value.length - 2)
+        : '•'.repeat(value.length);
+      const meta = getKeyMeta(name);
+      keys.push({ name, masked, has_value: value.length > 0, category: meta.cat, description: meta.desc, provider_url: meta.url, is_advanced: meta.adv });
+    }
+
+    // Group by category
+    const cats = {};
+    const catOrder = ['LLM Providers', 'Tool APIs', 'Messaging Platforms', 'Agent Settings', 'MCP Keys', 'Advanced'];
+    keys.forEach(k => {
+      if (!cats[k.category]) cats[k.category] = [];
+      cats[k.category].push(k);
+    });
+    const categories = catOrder.filter(c => cats[c]).map(c => ({ name: c, keys: cats[c] }));
+    // Add any remaining uncategorized
+    Object.keys(cats).forEach(c => {
+      if (!catOrder.includes(c) && c !== 'Advanced') {
+        categories.push({ name: c, keys: cats[c] });
+      }
+    });
+
+    res.json({ ok: true, keys, categories });
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
+// Keys — reveal single key value
+app.get('/api/keys/:profile/reveal/:name', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const profile = sanitizeProfileName(req.params.profile);
+    const keyName = req.params.name;
+    if (!profile || !keyName) return res.status(400).json({ ok: false, error: 'invalid params' });
+    // Sanitize key name (allow only alphanumeric, underscore)
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(keyName)) {
+      return res.status(400).json({ ok: false, error: 'invalid key name' });
+    }
+    const home = profile === 'default' ? `${process.env.HOME}/.hermes` : `${process.env.HOME}/.hermes/profiles/${profile}`;
+    const envPath = `${home}/.env`;
+    const raw = await shell(`grep -E "^${keyName}=" "${envPath}" 2>/dev/null || echo ""`);
+    if (!raw.trim()) {
+      return res.json({ ok: false, error: 'Key not found' });
+    }
+    const value = raw.trim().substring(raw.indexOf('=') + 1).trim();
+    audit(req.hciUser?.username || 'unknown', req.hciUser?.role || 'unknown', 'KEY_REVEAL', `${profile}:${keyName}`);
+    res.json({ ok: true, value });
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
+// Keys — save/update key
+app.put('/api/keys/:profile', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const profile = sanitizeProfileName(req.params.profile);
+    if (!profile) return res.status(400).json({ ok: false, error: 'invalid profile name' });
+    const { name, value } = req.body || {};
+    if (!name || typeof name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+      return res.status(400).json({ ok: false, error: 'invalid key name (must match [A-Za-z_][A-Za-z0-9_]*)' });
+    }
+    if (typeof value !== 'string') {
+      return res.status(400).json({ ok: false, error: 'value must be a string' });
+    }
+    const home = profile === 'default' ? `${process.env.HOME}/.hermes` : `${process.env.HOME}/.hermes/profiles/${profile}`;
+    const envPath = `${home}/.env`;
+    // Read current .env
+    const raw = await shell(`cat "${envPath}" 2>/dev/null || echo ""`);
+    const lines = raw.split('\n');
+    const keyRegex = new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}=`);
+    const existingIdx = lines.findIndex(l => keyRegex.test(l.trim()));
+    // Escape value for .env — quote only if value has spaces/special chars
+    const needsQuote = /[\s"'`$\\#!]/.test(value) || value === '';
+    const line = needsQuote ? `${name}='${value.replace(/'/g, "'\\''")}'` : `${name}=${value}`;
+    if (existingIdx >= 0) {
+      // Update existing
+      lines[existingIdx] = line;
+    } else {
+      // Add new
+      lines.push(line);
+    }
+    const newContent = lines.join('\n');
+    fs.writeFileSync(envPath, newContent + '\n');
+    audit(req.hciUser?.username || 'unknown', req.hciUser?.role || 'unknown', 'KEY_UPDATE', `${profile}:${name}`);
+    res.json({ ok: true });
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
+// Keys — delete key
+app.delete('/api/keys/:profile/:name', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const profile = sanitizeProfileName(req.params.profile);
+    const keyName = req.params.name;
+    if (!profile || !keyName) return res.status(400).json({ ok: false, error: 'invalid params' });
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(keyName)) {
+      return res.status(400).json({ ok: false, error: 'invalid key name' });
+    }
+    const home = profile === 'default' ? `${process.env.HOME}/.hermes` : `${process.env.HOME}/.hermes/profiles/${profile}`;
+    const envPath = `${home}/.env`;
+    // Remove the key line using sed
+    await shell(`sed -i '/^${keyName}=/d' "${envPath}"`);
+    audit(req.hciUser?.username || 'unknown', req.hciUser?.role || 'unknown', 'KEY_DELETE', `${profile}:${keyName}`);
+    res.json({ ok: true });
   } catch (e) {
     res.json({ ok: false, error: e.message });
   }
@@ -2114,9 +2794,28 @@ app.get('/api/skills/search/:query', requireAuth, async (req, res) => {
   try {
     const query = decodeURIComponent(req.params.query);
     const output = await execHermes(['skills', 'search', query], 15000);
-    res.json({ ok: true, output });
+    // Parse table output into structured results
+    const lines = output.split('\n');
+    const results = [];
+    for (const line of lines) {
+      // Match lines like: │ solana │ Query Solana blockchain... │ official │ official │ official/blockchain/… │
+      const cells = line.split('│').map(c => c.trim()).filter(Boolean);
+      if (cells.length >= 4 && !cells[0].match(/^[━┏┗┓┛┠┨┯┷┼─]+$/) && cells[0] !== 'Name') {
+        results.push({
+          name: cells[0],
+          description: cells[1] || '',
+          source: cells[2] || '',
+          trust: cells[3] || '',
+          identifier: cells[4] || cells[0],
+        });
+      }
+    }
+    // Deduplicate by name
+    const seen = new Set();
+    const unique = results.filter(r => { if (seen.has(r.name)) return false; seen.add(r.name); return true; });
+    res.json({ ok: true, output, results: unique });
   } catch (e) {
-    res.json({ ok: false, error: e.message });
+    res.json({ ok: false, error: e.message, results: [] });
   }
 });
 
@@ -2149,8 +2848,8 @@ app.post('/api/skills/install', requireRole('admin'), async (req, res) => {
   try {
     const { skill, profile } = req.body || {};
     if (!skill) return res.status(400).json({ ok: false, error: 'skill name required' });
-    const flag = profile ? `-p ${sanitizeProfileName(profile)}` : '';
-    const output = await execHermes([flag, 'skills', 'install', skill, '--yes'].filter(Boolean), 30000);
+    const profArg = profile ? ['-p', sanitizeProfileName(profile)] : [];
+    const output = await execHermes([...profArg, 'skills', 'install', skill, '--yes'], 30000);
     const success = !output.includes('error') && !output.includes('Error');
     res.json({ ok: success, output });
   } catch (e) {
@@ -2163,8 +2862,8 @@ app.post('/api/skills/uninstall', requireRole('admin'), async (req, res) => {
   try {
     const { skill, profile } = req.body || {};
     if (!skill) return res.status(400).json({ ok: false, error: 'skill name required' });
-    const flag = profile ? `-p ${sanitizeProfileName(profile)}` : '';
-    const output = await execHermes([flag, 'skills', 'uninstall', skill, '--yes'].filter(Boolean), 15000);
+    const profArg = profile ? ['-p', sanitizeProfileName(profile)] : [];
+    const output = await shell(`echo y | hermes ${profile ? `-p ${sanitizeProfileName(profile)} ` : ''}skills uninstall ${skill} 2>&1`, 15000);
     res.json({ ok: true, output });
   } catch (e) {
     res.json({ ok: false, error: e.message });
@@ -2190,9 +2889,19 @@ app.post('/api/skills/check', requireAuth, async (req, res) => {
     const { profile } = req.body || {};
     const flag = profile ? `-p ${sanitizeProfileName(profile)} ` : '';
     const output = await shell(`hermes ${flag}skills check 2>&1`, '30s');
-    res.json({ ok: true, output });
+    // Parse table output
+    const lines = output.split('\n');
+    const updates = [];
+    for (const line of lines) {
+      const cells = line.split(/[┃┡━╇┓┛┠┨┯┷┼─]+/).map(c => c.trim()).filter(Boolean);
+      if (cells.length >= 3 && cells[0] !== 'Name' && !cells[0].match(/^[━┏┗┓┛]+$/)) {
+        updates.push({ name: cells[0], source: cells[1], status: cells[2] });
+      }
+    }
+    const hasUpdates = updates.some(u => /update|outdated|newer/i.test(u.status));
+    res.json({ ok: true, output, updates, hasUpdates });
   } catch (e) {
-    res.json({ ok: false, error: e.message });
+    res.json({ ok: false, error: e.message, updates: [] });
   }
 });
 
@@ -2205,6 +2914,53 @@ app.post('/api/doctor', requireRole('admin'), async (req, res) => {
   } catch (e) {
     res.json({ ok: false, output: e.message });
   }
+});
+
+// ── Backup & Import ──
+app.post('/api/backup/create', requireRole('admin'), async (req, res) => {
+  try {
+    const output = await shell('hermes backup -o /tmp/hermes-backup.zip 2>&1', '60s');
+    if (output.includes('error') || output.includes('Error')) {
+      return res.json({ ok: false, error: output.trim() });
+    }
+    const filename = 'hermes-backup-' + new Date().toISOString().slice(0, 10) + '.zip';
+    res.json({ ok: true, path: '/tmp/hermes-backup.zip', filename, output: output.trim() });
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/api/backup/import', requireRole('admin'), (req, res) => {
+  // Inline multer for this route
+  const multer = require('multer');
+  const upload = multer({ dest: '/tmp/', limits: { fileSize: 500 * 1024 * 1024 } });
+  upload.single('backup')(req, res, async (err) => {
+    if (err || !req.file) return res.json({ ok: false, error: err?.message || 'No file uploaded' });
+    try {
+      const zipPath = req.file.path;
+      const output = await new Promise((resolve, reject) => {
+        execFile('hermes', ['import', '--force', zipPath], { timeout: 60000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+          resolve(err ? (stdout || err.message) : stdout);
+        });
+      });
+      try { fs.unlinkSync(zipPath); } catch {}
+      if (output.includes('error') || output.includes('Error')) {
+        return res.json({ ok: false, error: output.trim() });
+      }
+      res.json({ ok: true, output: output.trim() });
+    } catch (e) {
+      res.json({ ok: false, error: e.message });
+    }
+  });
+});
+
+app.get('/api/backup/download', requireRole('admin'), (req, res) => {
+  const filePath = req.query.path;
+  if (!filePath || !filePath.endsWith('.zip') || filePath.includes('..')) {
+    return res.status(400).json({ error: 'Invalid path' });
+  }
+  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File not found' });
+  res.download(filePath);
 });
 
 // Dump
@@ -2311,6 +3067,63 @@ app.get('/api/sessions/:id/export', requireAuth, async (req, res) => {
   }
 });
 
+// Session messages — Phase 1: Message Viewer
+const Database = require('better-sqlite3');
+const STATE_DB_PATH = path.join(CONTROL_HOME, 'state.db');
+
+app.get('/api/sessions/:id/messages', requireAuth, (req, res) => {
+  try {
+    const sessionId = sanitizeSessionId(req.params.id);
+    if (!sessionId) return res.status(400).json({ ok: false, error: 'invalid session id' });
+
+    // Resolve profile-aware state.db path
+    const profile = sanitizeProfileName(req.query.profile);
+    const stateDbPath = profile && profile !== 'default'
+      ? path.join(os.homedir(), '.hermes', 'profiles', profile, 'state.db')
+      : STATE_DB_PATH;
+
+    if (!fs.existsSync(stateDbPath)) {
+      return res.json({ ok: false, error: `state.db not found for profile: ${profile || 'default'}` });
+    }
+
+    const db = new Database(stateDbPath, { readonly: true });
+    try {
+      // Get session metadata
+      const session = db.prepare(`
+        SELECT id, source, model, title, started_at, ended_at,
+               message_count, tool_call_count, input_tokens, output_tokens,
+               estimated_cost_usd
+        FROM sessions WHERE id = ?
+      `).get(sessionId);
+
+      if (!session) {
+        return res.json({ ok: false, error: 'Session not found' });
+      }
+
+      // Get messages
+      const messages = db.prepare(`
+        SELECT id, role, content, tool_calls, tool_name, timestamp,
+               reasoning, finish_reason
+        FROM messages
+        WHERE session_id = ?
+        ORDER BY timestamp ASC
+      `).all(sessionId);
+
+      // Parse tool_calls JSON strings
+      const parsed = messages.map(m => ({
+        ...m,
+        tool_calls: m.tool_calls ? JSON.parse(m.tool_calls) : null,
+      }));
+
+      res.json({ ok: true, session, messages: parsed });
+    } finally {
+      db.close();
+    }
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
 // Session delete
 app.delete('/api/sessions/:id', requireCsrf, async (req, res) => {
   try {
@@ -2338,14 +3151,68 @@ app.get('/api/sessions/stats', requireAuth, async (req, res) => {
 });
 
 // Token usage / insights
-app.get('/api/usage/:days', requireAuth, async (req, res) => {
+app.get('/api/usage/:days', requireAuth, requirePerm('usage.view'), async (req, res) => {
   try {
     const days = Math.min(parseInt(req.params.days || '7', 10), 90);
     const profile = sanitizeProfileName(req.query.profile) || undefined;
-    const cmd = profile ? `hermes --profile ${profile} insights --days ${days}` : `hermes insights --days ${days}`;
-    const raw = await shell(`${cmd} 2>&1`, '60s');
-    const parsed = parseInsights(raw);
-    res.json({ ok: true, ...parsed, raw });
+
+    if (profile) {
+      // Single profile
+      const raw = await shell(`hermes --profile ${profile} insights --days ${days} 2>&1`, '60s');
+      const parsed = parseInsights(raw);
+      return res.json({ ok: true, ...parsed, raw });
+    }
+
+    // All profiles — aggregate
+    const profilesRaw = await shell('hermes profile list 2>&1', '15s');
+    const profiles = parseHermesProfileList(profilesRaw);
+    const profileNames = profiles.map(p => p.name);
+
+    if (profileNames.length === 0) {
+      const raw = await shell(`hermes insights --days ${days} 2>&1`, '60s');
+      return res.json({ ok: true, ...parseInsights(raw), raw });
+    }
+
+    // Fetch insights for all profiles in parallel
+    const results = await Promise.allSettled(
+      profileNames.map(p => shell(`hermes --profile ${p} insights --days ${days} 2>&1`, '60s').then(r => ({ profile: p, parsed: parseInsights(r) })))
+    );
+
+    // Aggregate
+    const agg = { sessions: 0, messages: 0, toolCalls: 0, userMessages: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, cost: '$0.00', activeTime: '', avgSession: '', period: `${days} days (all profiles)`, models: [], platforms: [], topTools: [] };
+    const modelMap = {};
+    const platformMap = {};
+    const toolMap = {};
+    let totalCost = 0;
+
+    for (const r of results) {
+      if (r.status !== 'fulfilled') continue;
+      const p = r.value.parsed;
+      agg.sessions += p.sessions || 0;
+      agg.messages += p.messages || 0;
+      agg.toolCalls += p.toolCalls || 0;
+      agg.inputTokens += p.inputTokens || 0;
+      agg.outputTokens += p.outputTokens || 0;
+      agg.totalTokens += p.totalTokens || 0;
+      const costNum = parseFloat((p.cost || '$0').replace(/[$,]/g, '')) || 0;
+      totalCost += costNum;
+      for (const m of (p.models || [])) {
+        if (!modelMap[m.name]) modelMap[m.name] = { name: m.name, sessions: 0, tokens: 0 };
+        modelMap[m.name].sessions += m.sessions || 0;
+        modelMap[m.name].tokens += parseInt((m.tokens || '0').replace(/,/g, ''), 10) || 0;
+      }
+      for (const pl of (p.platforms || [])) {
+        if (!platformMap[pl.name]) platformMap[pl.name] = { name: pl.name, sessions: 0, tokens: 0 };
+        platformMap[pl.name].sessions += pl.sessions || 0;
+        platformMap[pl.name].tokens += parseInt((pl.tokens || '0').replace(/,/g, ''), 10) || 0;
+      }
+    }
+
+    agg.cost = '$' + totalCost.toFixed(2);
+    agg.models = Object.values(modelMap).sort((a, b) => b.tokens - a.tokens);
+    agg.platforms = Object.values(platformMap).sort((a, b) => b.sessions - a.sessions);
+
+    res.json({ ok: true, ...agg });
   } catch (e) {
     res.json({ ok: false, error: e.message });
   }
@@ -2419,6 +3286,132 @@ function parseInsights(raw) {
   return data;
 }
 
+// Daily usage breakdown (for charts) — queries state.db directly
+app.get('/api/usage/daily/:days', requireAuth, requirePerm('usage.view'), async (req, res) => {
+  try {
+    const days = Math.min(parseInt(req.params.days || '7', 10), 90);
+    const profile = sanitizeProfileName(req.query.profile);
+    const stateDbPath = profile && profile !== 'default'
+      ? path.join(os.homedir(), '.hermes', 'profiles', profile, 'state.db')
+      : STATE_DB_PATH;
+
+    if (!fs.existsSync(stateDbPath)) {
+      return res.json({ ok: false, error: 'state.db not found' });
+    }
+
+    const db = new Database(stateDbPath, { readonly: true });
+    try {
+      const since = `-${days}`;
+
+      // Raw sessions for dynamic cost calculation
+      const rawSessions = db.prepare(`
+        SELECT
+          DATE(started_at, 'unixepoch', 'localtime') as date,
+          model,
+          source,
+          billing_provider,
+          input_tokens,
+          output_tokens,
+          cache_read_tokens,
+          message_count,
+          tool_call_count
+        FROM sessions
+        WHERE started_at > strftime('%s', 'now', ? || ' days')
+      `).all(since);
+
+      // Calculate costs dynamically and aggregate
+      const dailyMap = {};
+      const modelMap = {};
+      const platformMap = {};
+      let totalSessions = 0, totalInput = 0, totalOutput = 0, totalCost = 0;
+      let totalMessages = 0, totalToolCalls = 0;
+
+      for (const s of rawSessions) {
+        const cost = calculateCost(s.model, s.input_tokens || 0, s.output_tokens || 0, s.cache_read_tokens || 0, s.billing_provider);
+        const tokens = (s.input_tokens || 0) + (s.output_tokens || 0);
+
+        // Daily
+        if (!dailyMap[s.date]) dailyMap[s.date] = { date: s.date, sessions: 0, input_tokens: 0, output_tokens: 0, total_tokens: 0, cost: 0, messages: 0, tool_calls: 0 };
+        const d = dailyMap[s.date];
+        d.sessions++; d.input_tokens += s.input_tokens || 0; d.output_tokens += s.output_tokens || 0;
+        d.total_tokens += tokens; d.cost += cost; d.messages += s.message_count || 0; d.tool_calls += s.tool_call_count || 0;
+
+        // By model
+        const mKey = s.model || 'unknown';
+        if (!modelMap[mKey]) modelMap[mKey] = { model: mKey, sessions: 0, total_tokens: 0, cost: 0 };
+        modelMap[mKey].sessions++; modelMap[mKey].total_tokens += tokens; modelMap[mKey].cost += cost;
+
+        // By platform
+        const pKey = s.source || 'unknown';
+        if (!platformMap[pKey]) platformMap[pKey] = { platform: pKey, sessions: 0, total_tokens: 0, cost: 0 };
+        platformMap[pKey].sessions++; platformMap[pKey].total_tokens += tokens; platformMap[pKey].cost += cost;
+
+        totalSessions++; totalInput += s.input_tokens || 0; totalOutput += s.output_tokens || 0;
+        totalCost += cost; totalMessages += s.message_count || 0; totalToolCalls += s.tool_call_count || 0;
+      }
+
+      const daily = Object.values(dailyMap).sort((a, b) => a.date.localeCompare(b.date));
+      const byModel = Object.values(modelMap).sort((a, b) => b.total_tokens - a.total_tokens);
+      const byPlatform = Object.values(platformMap).sort((a, b) => b.total_tokens - a.total_tokens);
+
+      // By hour of day
+      const byHour = db.prepare(`
+        SELECT
+          CAST(strftime('%H', started_at, 'unixepoch', 'localtime') AS INTEGER) as hour,
+          COUNT(*) as sessions,
+          SUM(input_tokens + output_tokens) as total_tokens
+        FROM sessions
+        WHERE started_at > strftime('%s', 'now', ? || ' days')
+        GROUP BY hour
+        ORDER BY hour ASC
+      `).all(since);
+
+      // Top tools
+      const topTools = db.prepare(`
+        SELECT tool_name, COUNT(*) as calls
+        FROM messages
+        WHERE tool_name IS NOT NULL
+          AND tool_name != ''
+          AND timestamp > strftime('%s', 'now', ? || ' days')
+        GROUP BY tool_name
+        ORDER BY calls DESC
+        LIMIT 10
+      `).all(since);
+
+      // Avg duration
+      const avgDur = db.prepare(`
+        SELECT AVG(ended_at - started_at) as avg_duration
+        FROM sessions
+        WHERE started_at > strftime('%s', 'now', ? || ' days')
+      `).get(since);
+
+      res.json({
+        ok: true,
+        days,
+        daily,
+        byModel,
+        byPlatform,
+        byHour: byHour || [],
+        topTools: topTools || [],
+        totals: {
+          sessions: totalSessions,
+          input_tokens: totalInput,
+          output_tokens: totalOutput,
+          total_tokens: totalInput + totalOutput,
+          cost: totalCost,
+          messages: totalMessages,
+          tool_calls: totalToolCalls,
+          avg_duration: avgDur?.avg_duration || 0,
+        },
+      });
+    } finally {
+      db.close();
+    }
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
 // Create agent (profile)
 app.post('/api/profiles/create', requireRole('admin'), async (req, res) => {
   try {
@@ -2462,7 +3455,7 @@ app.delete('/api/profiles/:name', requireRole('admin'), async (req, res) => {
 });
 
 // Agent insights (per profile)
-app.get('/api/insights/:profile/:days', requireAuth, async (req, res) => {
+app.get('/api/insights/:profile/:days', requireAuth, requirePerm('usage.view'), async (req, res) => {
   try {
     const profile = sanitizeProfileName(req.params.profile);
     if (!profile) return res.status(400).json({ ok: false, error: 'invalid profile name' });
@@ -2553,6 +3546,27 @@ app.post('/api/hermes-cron/:profile/:jobId/:action', requireCsrf, async (req, re
     if (!['pause', 'resume', 'run', 'remove'].includes(action)) return res.status(400).json({ ok: false, error: 'invalid action' });
     const output = await execHermes(['-p', profile, 'cron', action, jobId], 10000);
     addNotification('info', `Cron ${action}: ${jobId.slice(0, 8)}…`);
+    res.json({ ok: true, output });
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
+// Cron edit endpoint
+app.put('/api/hermes-cron/:profile/:jobId', requireCsrf, async (req, res) => {
+  try {
+    const profile = sanitizeProfileName(req.params.profile);
+    const jobId = req.params.jobId;
+    if (!profile) return res.status(400).json({ ok: false, error: 'invalid profile name' });
+    if (!/^[a-f0-9]+$/.test(jobId)) return res.status(400).json({ ok: false, error: 'invalid job id' });
+    const { schedule, prompt, name, deliver, repeat } = req.body || {};
+    const args = ['-p', profile, 'cron', 'edit', jobId];
+    if (schedule) args.push('--schedule', schedule);
+    if (prompt !== undefined) args.push('--prompt', prompt);
+    if (name !== undefined) args.push('--name', name);
+    if (deliver !== undefined) args.push('--deliver', deliver);
+    if (repeat !== undefined) args.push('--repeat', String(repeat));
+    const output = await execHermes(args, 10000);
     res.json({ ok: true, output });
   } catch (e) {
     res.json({ ok: false, error: e.message });

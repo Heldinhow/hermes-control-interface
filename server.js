@@ -278,6 +278,79 @@ const events = [];
 // No in-memory chat sessions — sidebar shows actual hermes sessions
 // Sending a message uses --resume with the real hermes session ID
 
+// ── Gateway API Proxy (fast, structured events) ────────────────────
+const GATEWAY_API_BASE = 'http://127.0.0.1:8642';
+const GATEWAY_API_KEY = process.env.GATEWAY_API_KEY || 'hci-gateway-2026';
+
+// POST /api/gateway/responses — start a new agent run via Gateway API
+app.post('/api/gateway/responses', requireAuth, requirePerm('chat.use'), async (req, res) => {
+  const { message, profile, session_id, model, stream = true } = req.body || {};
+  if (!message || typeof message !== 'string') return res.status(400).json({ error: 'message required' });
+
+  try {
+    const gatewayBody = {
+      model: model || 'glm-5.1',
+      input: message,
+      stream,
+    };
+    if (session_id) {
+      gatewayBody.previous_response_id = session_id;
+    }
+
+    const gatewayRes = await fetch(`${GATEWAY_API_BASE}/v1/responses`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${GATEWAY_API_KEY}`,
+        ...(profile && profile !== 'default' ? { 'X-Hermes-Profile': profile } : {}),
+      },
+      body: JSON.stringify(gatewayBody),
+    });
+
+    if (!gatewayRes.ok) {
+      const errText = await gatewayRes.text();
+      return res.status(gatewayRes.status).json({ error: `Gateway error: ${errText}` });
+    }
+
+    if (!stream) {
+      // Non-streaming: return JSON directly
+      const data = await gatewayRes.json();
+      return res.json(data);
+    }
+
+    // Streaming: proxy SSE events to client
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+
+    const reader = gatewayRes.body;
+    reader.on('data', (chunk) => {
+      res.write(chunk);
+    });
+    reader.on('end', () => {
+      res.end();
+    });
+    reader.on('error', (err) => {
+      console.error('[Gateway proxy] stream error:', err.message);
+      res.end();
+    });
+
+    // Client abort → close gateway connection
+    req.on('close', () => {
+      reader.destroy();
+    });
+  } catch (e) {
+    console.error('[Gateway proxy] error:', e.message);
+    if (!res.headersSent) {
+      return res.status(502).json({ error: `Gateway unavailable: ${e.message}` });
+    }
+    res.end();
+  }
+});
+
 app.post('/api/chat/send', requireAuth, requirePerm('chat.use'), async (req, res) => {
   const { message, profile, sessionId, model } = req.body || {};
   if (!message || typeof message !== 'string') return res.status(400).json({ error: 'message required' });

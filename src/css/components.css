@@ -1884,3 +1884,81 @@
 .chat-tool-body { display: none; border-top: 1px solid var(--border); padding: 8px 10px; background: rgba(0,0,0,0.15); }
 .chat-tool-card.expanded .chat-tool-body { display: block; }
 .chat-tool-args pre { color: var(--fg); }
+
+/* ===== Gateway API Tool Call Cards ===== */
+.tool-call-card {
+  margin: 8px 0;
+  border-radius: 8px;
+  background: var(--bg-input, #1e1e2e);
+  border-left: 3px solid var(--gold, #ffac02);
+  padding: 10px 12px;
+  font-size: 13px;
+  animation: fadeIn 0.2s ease;
+}
+.tool-call-card .tool-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.tool-call-card .tool-card-icon { font-size: 14px; }
+.tool-call-card .tool-card-name {
+  font-weight: 600;
+  color: var(--gold, #ffac02);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+}
+.tool-call-card .tool-card-status {
+  margin-left: auto;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.tool-call-card .tool-card-status.running {
+  background: rgba(255, 172, 2, 0.15);
+  color: var(--gold, #ffac02);
+  animation: pulse 1.5s infinite;
+}
+.tool-call-card .tool-card-status.done {
+  background: rgba(52, 211, 153, 0.15);
+  color: var(--green, #34d399);
+}
+.tool-call-card .tool-card-status.error {
+  background: rgba(255, 107, 107, 0.15);
+  color: var(--red, #ff6b6b);
+}
+.tool-call-card .tool-card-args code {
+  display: block;
+  font-size: 11px;
+  color: var(--fg-subtle);
+  white-space: pre-wrap;
+  max-height: 80px;
+  overflow-y: auto;
+  font-family: 'JetBrains Mono', monospace;
+}
+.tool-call-card .tool-card-preview {
+  font-size: 11px;
+  color: var(--fg-subtle);
+  padding-top: 4px;
+}
+.tool-call-card .tool-card-result details summary {
+  cursor: pointer;
+  color: var(--teal, #4ecdc4);
+  font-size: 11px;
+}
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+@media (max-width: 768px) {
+  .tool-call-card {
+    font-size: 12px;
+    padding: 8px 10px;
+  }
+}

@@ -639,7 +639,6 @@ async function sendChatMessage() {
   const text = input?.value?.trim();
   if (!text) return;
   const profile = document.getElementById('chat-profile')?.value || 'default';
-  // Option B: Only send sessionId if it exists (resume), otherwise let backend create new session
   const sessionId = state._currentChatSession || null;
   input.value = '';
   input.style.height = 'auto';
@@ -660,65 +659,195 @@ async function sendChatMessage() {
   if (messagesDiv) messagesDiv.scrollTop = messagesDiv.scrollHeight;
   const contentDiv = streamEl.querySelector('#chat-stream-content');
   let fullContent = '';
-  let startTime = Date.now();
+  const startTime = Date.now();
   try {
-    // Only include sessionId in body if it exists (for resume)
-    const bodyObj = { message: text, profile };
-    if (sessionId) bodyObj.sessionId = sessionId;
-    const body = JSON.stringify(bodyObj);
-    const response = await fetch('/api/chat/send', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': state.csrfToken || '' }, credentials: 'include', body });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let done = false;
-    while (!done) {
-      const { done: d, value } = await reader.read();
-      if (d) { done = true; break; }
-      buffer += decoder.decode(value, { stream: true });
-      // Parse SSE data: lines
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        try {
-          const evt = JSON.parse(line.slice(6));
-          if (evt.type === 'token') {
-            fullContent += evt.content;
-            contentDiv.innerHTML = renderChatContent(fullContent) + '<span class="chat-cursor" style="animation:blink 1s infinite;">▊</span>';
-            if (messagesDiv) messagesDiv.scrollTop = messagesDiv.scrollHeight;
-          } else if (evt.type === 'done') {
-            if (evt.sessionId) state._currentChatSession = evt.sessionId;
-          } else if (evt.type === 'error') {
-            fullContent += '\n[Error: ' + evt.content + ']';
-          }
-        } catch {}
-      }
+    // Try Gateway API first
+    await sendViaGatewayAPI(text, profile, sessionId, contentDiv, messagesDiv, startTime);
+  } catch (gwErr) {
+    console.warn('[Chat] Gateway API failed, falling back to CLI:', gwErr.message);
+    // Fallback: clear streaming div and try CLI
+    try {
+      await sendViaCLI(text, profile, sessionId, contentDiv, messagesDiv, startTime);
+    } catch (cliErr) {
+      if (contentDiv) contentDiv.innerHTML = renderChatContent(fullContent) + '<div style="color:var(--red);margin-top:8px;">Error: ' + escapeHtml(cliErr.message) + '</div>';
     }
-    // Process remaining buffer
-    if (buffer.startsWith('data: ')) {
-      try {
-        const evt = JSON.parse(buffer.slice(6));
-        if (evt.type === 'token') fullContent += evt.content;
-        if (evt.type === 'done' && evt.sessionId) state._currentChatSession = evt.sessionId;
-      } catch {}
-    }
-    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    if (contentDiv) {
-      contentDiv.innerHTML = renderChatContent(fullContent) + '<div style="font-size:10px;color:var(--fg-subtle);margin-top:8px;">' + elapsed + 's</div>';
-    }
-    const stats = document.getElementById('chat-status-session');
-    const elapsedEl = document.getElementById('chat-status-elapsed');
-    if (stats) stats.textContent = state._currentChatSession || '—';
-    if (elapsedEl) elapsedEl.textContent = elapsed + 's';
-    // Refresh sidebar to show new session
-    refreshChatSidebar();
-  } catch (e) {
-    if (contentDiv) contentDiv.innerHTML = renderChatContent(fullContent) + '<div style="color:var(--red);margin-top:8px;">Error: ' + escapeHtml(e.message) + '</div>';
   } finally {
     state._chatLock = false;
     if (btn) { btn.disabled = false; btn.textContent = 'Send'; }
   }
+}
+
+// ── Gateway API Chat (fast, structured events) ──
+async function sendViaGatewayAPI(text, profile, sessionId, contentDiv, messagesDiv, startTime) {
+  const toolCards = new Map(); // call_id → DOM element
+  const bodyObj = { message: text, profile, stream: true };
+  if (sessionId) bodyObj.session_id = sessionId;
+  const response = await fetch('/api/gateway/responses', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': state.csrfToken || '' },
+    credentials: 'include',
+    body: JSON.stringify(bodyObj),
+  });
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Gateway ${response.status}: ${err}`);
+  }
+  let fullContent = '';
+  let responseId = null;
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let done = false;
+  while (!done) {
+    const { done: d, value } = await reader.read();
+    if (d) { done = true; break; }
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+    for (const line of lines) {
+      if (!line.startsWith('event: ') && !line.startsWith('data: ')) continue;
+      if (line.startsWith('event: ')) continue; // we parse from data lines
+      if (!line.startsWith('data: ')) continue;
+      try {
+        const evt = JSON.parse(line.slice(6));
+        const evtType = evt.type || '';
+        if (evtType === 'response.created') {
+          responseId = evt.response?.id || responseId;
+        } else if (evtType === 'response.output_text.delta') {
+          fullContent += evt.delta || '';
+          updateStreamContent(contentDiv, fullContent, toolCards, messagesDiv);
+        } else if (evtType === 'response.output_item.added') {
+          const item = evt.item || {};
+          if (item.type === 'tool_call') {
+            const cardEl = addToolCallCard(contentDiv, item.call_id || evt.item?.id, item.name, item.args);
+            toolCards.set(item.call_id || evt.item?.id, cardEl);
+            if (messagesDiv) messagesDiv.scrollTop = messagesDiv.scrollHeight;
+          }
+        } else if (evtType === 'hermes.tool.progress') {
+          updateToolProgress(toolCards, evt.name, evt.preview);
+        } else if (evtType === 'response.output_item.done') {
+          const item = evt.item || {};
+          if (item.type === 'tool_call') {
+            finalizeToolCard(toolCards, item.call_id || item.id, item.result || item.output || '');
+            if (messagesDiv) messagesDiv.scrollTop = messagesDiv.scrollHeight;
+          }
+        } else if (evtType === 'response.completed') {
+          responseId = evt.response?.id || responseId;
+          if (responseId) state._currentChatSession = responseId;
+        }
+      } catch (parseErr) { /* skip unparseable lines */ }
+    }
+  }
+  // Finalize
+  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+  updateStreamContent(contentDiv, fullContent, toolCards, null, elapsed);
+  const stats = document.getElementById('chat-status-session');
+  const elapsedEl = document.getElementById('chat-status-elapsed');
+  if (stats) stats.textContent = state._currentChatSession || '—';
+  if (elapsedEl) elapsedEl.textContent = elapsed + 's';
+  refreshChatSidebar();
+}
+
+// ── CLI Fallback Chat (legacy) ──
+async function sendViaCLI(text, profile, sessionId, contentDiv, messagesDiv, startTime) {
+  let fullContent = '';
+  const bodyObj = { message: text, profile };
+  if (sessionId) bodyObj.sessionId = sessionId;
+  const response = await fetch('/api/chat/send', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': state.csrfToken || '' },
+    credentials: 'include',
+    body: JSON.stringify(bodyObj),
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let done = false;
+  while (!done) {
+    const { done: d, value } = await reader.read();
+    if (d) { done = true; break; }
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      try {
+        const evt = JSON.parse(line.slice(6));
+        if (evt.type === 'token') {
+          fullContent += evt.content;
+          if (contentDiv) contentDiv.innerHTML = renderChatContent(fullContent) + '<span class="chat-cursor" style="animation:blink 1s infinite;">▊</span>';
+          if (messagesDiv) messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        } else if (evt.type === 'done') {
+          if (evt.sessionId) state._currentChatSession = evt.sessionId;
+        } else if (evt.type === 'error') {
+          fullContent += '\n[Error: ' + evt.content + ']';
+        }
+      } catch {}
+    }
+  }
+  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+  if (contentDiv) contentDiv.innerHTML = renderChatContent(fullContent) + '<div style="font-size:10px;color:var(--fg-subtle);margin-top:8px;">' + elapsed + 's</div>';
+  refreshChatSidebar();
+}
+
+// ── Tool Call Card Rendering ──
+function addToolCallCard(contentDiv, callId, name, args) {
+  const card = document.createElement('div');
+  card.className = 'tool-call-card';
+  card.id = `tool-card-${callId}`;
+  card.innerHTML = `
+    <div class="tool-card-header">
+      <span class="tool-card-icon">🔧</span>
+      <span class="tool-card-name">${escapeHtml(name || 'tool')}</span>
+      <span class="tool-card-status running">running</span>
+    </div>
+    <div class="tool-card-args"><code>${escapeHtml(typeof args === 'string' ? args : JSON.stringify(args, null, 2).substring(0, 300))}</code></div>
+    <div class="tool-card-preview" id="tool-preview-${callId}"></div>
+    <div class="tool-card-result" id="tool-result-${callId}"></div>`;
+  // Insert before cursor
+  const cursor = contentDiv.querySelector('.chat-cursor');
+  if (cursor) {
+    contentDiv.insertBefore(card, cursor);
+  } else {
+    contentDiv.appendChild(card);
+  }
+  return card;
+}
+
+function updateToolProgress(toolCards, name, preview) {
+  for (const [id, el] of toolCards) {
+    const previewEl = el.querySelector('.tool-card-preview');
+    if (previewEl && preview) previewEl.textContent = preview;
+  }
+}
+
+function finalizeToolCard(toolCards, callId, result) {
+  const el = toolCards.get(callId);
+  if (!el) return;
+  const statusEl = el.querySelector('.tool-card-status');
+  if (statusEl) { statusEl.textContent = 'done'; statusEl.className = 'tool-card-status done'; }
+  const resultEl = el.querySelector(`#tool-result-${callId}`) || el.querySelector('.tool-card-result');
+  if (resultEl && result) {
+    const display = typeof result === 'string' ? result.substring(0, 500) : JSON.stringify(result).substring(0, 500);
+    resultEl.innerHTML = `<details><summary>Result</summary><pre style="margin:4px 0;font-size:11px;white-space:pre-wrap;max-height:200px;overflow-y:auto;">${escapeHtml(display)}</pre></details>`;
+  }
+}
+
+function updateStreamContent(contentDiv, fullContent, toolCards, messagesDiv, elapsed) {
+  if (!contentDiv) return;
+  // Keep existing tool cards, update text content
+  let html = renderChatContent(fullContent);
+  if (elapsed) {
+    html += `<div style="font-size:10px;color:var(--fg-subtle);margin-top:8px;">${elapsed}s</div>`;
+  } else {
+    html += '<span class="chat-cursor" style="animation:blink 1s infinite;">▊</span>';
+  }
+  // Rebuild: tool cards + text
+  const existingCards = contentDiv.querySelectorAll('.tool-call-card');
+  const cardHtml = Array.from(existingCards).map(c => c.outerHTML).join('');
+  contentDiv.innerHTML = cardHtml + html;
+  if (messagesDiv) messagesDiv.scrollTop = messagesDiv.scrollHeight;
 }
 
 function renderChatContent(text) {

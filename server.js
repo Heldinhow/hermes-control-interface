@@ -293,17 +293,19 @@ app.post('/api/gateway/responses', requireAuth, requirePerm('chat.use'), async (
       input: message,
       stream,
     };
+    // Use X-Hermes-Session-Id header for conversation continuity
+    const gwHeaders = {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${GATEWAY_API_KEY}`,
+      ...(profile && profile !== 'default' ? { 'X-Hermes-Profile': profile } : {}),
+    };
     if (session_id) {
-      gatewayBody.previous_response_id = session_id;
+      gwHeaders['X-Hermes-Session-Id'] = session_id;
     }
 
     const gatewayRes = await fetch(`${GATEWAY_API_BASE}/v1/responses`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${GATEWAY_API_KEY}`,
-        ...(profile && profile !== 'default' ? { 'X-Hermes-Profile': profile } : {}),
-      },
+      headers: gwHeaders,
       body: JSON.stringify(gatewayBody),
     });
 
@@ -312,36 +314,54 @@ app.post('/api/gateway/responses', requireAuth, requirePerm('chat.use'), async (
       return res.status(gatewayRes.status).json({ error: `Gateway error: ${errText}` });
     }
 
+    // Extract Hermes session ID from Gateway response headers
+    const hermesSessionId = gatewayRes.headers.get('x-hermes-session-id') || '';
+
     if (!stream) {
-      // Non-streaming: return JSON directly
       const data = await gatewayRes.json();
+      if (hermesSessionId) data._hermes_session_id = hermesSessionId;
       return res.json(data);
     }
 
-    // Streaming: proxy SSE events to client
+    // Streaming: proxy SSE events to client using Web ReadableStream API
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       'Connection': 'keep-alive',
       'X-Accel-Buffering': 'no',
+      ...(hermesSessionId ? { 'X-Hermes-Session-Id': hermesSessionId } : {}),
     });
 
-    const reader = gatewayRes.body;
-    reader.on('data', (chunk) => {
-      res.write(chunk);
-    });
-    reader.on('end', () => {
-      res.end();
-    });
-    reader.on('error', (err) => {
-      console.error('[Gateway proxy] stream error:', err.message);
-      res.end();
-    });
+    // Inject session ID as first SSE event so frontend can pick it up
+    if (hermesSessionId) {
+      res.write(`event: hci.session\ndata: ${JSON.stringify({ type: 'hci.session', session_id: hermesSessionId })}\n\n`);
+    }
 
-    // Client abort → close gateway connection
+    const webReader = gatewayRes.body.getReader();
+    const decoder = new TextDecoder();
+    let aborted = false;
+
+    // Client abort → cancel gateway stream
     req.on('close', () => {
-      reader.destroy();
+      aborted = true;
+      webReader.cancel().catch(() => {});
     });
+
+    // Pipe chunks from Gateway to client
+    (async () => {
+      try {
+        while (!aborted) {
+          const { done, value } = await webReader.read();
+          if (done) break;
+          const chunk = decoder.decode(value, { stream: true });
+          res.write(chunk);
+        }
+      } catch (pipeErr) {
+        console.error('[Gateway proxy] pipe error:', pipeErr.message);
+      } finally {
+        res.end();
+      }
+    })();
   } catch (e) {
     console.error('[Gateway proxy] error:', e.message);
     if (!res.headersSent) {

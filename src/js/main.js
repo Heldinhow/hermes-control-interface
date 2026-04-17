@@ -285,18 +285,21 @@ async function loadChat(container) {
       #chat-session-search { width:100%;margin:6px 0 0 0;padding:6px 8px;background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius);color:var(--fg);font-family:var(--font);font-size:12px;outline:none; }
       #chat-session-search::placeholder { color: var(--fg-muted); }
       @media (max-width: 768px) {
-        .chat-sidebar { position: fixed; left: 0; top: 56px; height: calc(100vh - 56px); z-index: 100; box-shadow: 2px 0 8px rgba(0,0,0,0.3); }
+        .chat-sidebar { position: fixed; left: 0; top: 56px; height: calc(100vh - 56px); z-index: 100; width: 85vw; max-width: 360px; box-shadow: 4px 0 24px rgba(0,0,0,0.5); }
         .chat-sidebar.collapsed { transform: translateX(-100%); }
         .chat-sidebar-backdrop.active { display: block; }
         .chat-layout { margin: -12px; height: calc(100vh - 56px - 48px); }
         .chat-header { position: relative; z-index: 102; }
         .chat-main { min-width: 0; }
+        .chat-input-area { padding: 8px 12px; padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px)); }
+        #chat-input { font-size: 16px !important; } /* Prevent iOS auto-zoom */
+        .chat-session-item { min-height: 56px; padding: 12px 14px; }
+        #chat-stop-btn { font-size: 14px; padding: 6px 14px; }
       }
       @media (max-width: 480px) {
-        .chat-sidebar { width: 100%; min-width: 100%; }
-        .chat-layout { margin: -8px; }
+        .chat-sidebar { width: 100vw; min-width: 100vw; }
       }
-    </style>
+     </style>
     <div class="chat-layout">
       <div id="chat-sidebar" class="chat-sidebar${sidebarCollapsed}">
         <div class="chat-sidebar-header">
@@ -336,6 +339,7 @@ async function loadChat(container) {
         <div class="chat-input-area">
           <textarea id="chat-input" placeholder="Type a message... (Enter to send)" rows="1" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChatMessage();}"></textarea>
           <button class="btn btn-primary" id="chat-send-btn" onclick="sendChatMessage()">Send</button>
+          <button class="btn btn-danger btn-sm" id="chat-stop-btn" style="display:none;" onclick="stopChatStream()">Stop</button>
         </div>
       </div>
     </div>
@@ -608,6 +612,32 @@ function toggleChatSidebar() {
   }
 }
 
+// Stop active chat stream (Gateway API or CLI)
+function stopChatStream() {
+  if (state._currentStreamReader) {
+    state._currentStreamReader.cancel().catch(() => {});
+    state._currentStreamReader = null;
+  }
+  state._chatLock = false;
+  const sendBtn = document.getElementById('chat-send-btn');
+  const stopBtn = document.getElementById('chat-stop-btn');
+  if (sendBtn) { sendBtn.disabled = false; sendBtn.textContent = 'Send'; }
+  if (stopBtn) stopBtn.style.display = 'none';
+  // Remove cursor
+  const cursor = document.querySelector('.chat-cursor');
+  if (cursor) cursor.remove();
+}
+
+// Filter sessions in sidebar by search text
+function filterChatSessions(query) {
+  const items = document.querySelectorAll('.chat-session-item');
+  const q = (query || '').toLowerCase().trim();
+  items.forEach(item => {
+    const title = (item.dataset.title || item.textContent || '').toLowerCase();
+    item.style.display = (!q || title.includes(q)) ? '' : 'none';
+  });
+}
+
 async function renameChatSession(sessionId = 0) {
   const sid = sessionId || state._currentChatSession;
   if (!sid) return showToast('No session selected', 'info');
@@ -660,6 +690,10 @@ async function sendChatMessage() {
   const contentDiv = streamEl.querySelector('#chat-stream-content');
   let fullContent = '';
   const startTime = Date.now();
+  // Show stop button, hide send
+  const stopBtn = document.getElementById('chat-stop-btn');
+  if (btn) { btn.disabled = true; btn.style.display = 'none'; }
+  if (stopBtn) stopBtn.style.display = 'inline-flex';
   try {
     // Try Gateway API first
     await sendViaGatewayAPI(text, profile, sessionId, contentDiv, messagesDiv, startTime);
@@ -673,15 +707,17 @@ async function sendChatMessage() {
     }
   } finally {
     state._chatLock = false;
-    if (btn) { btn.disabled = false; btn.textContent = 'Send'; }
+    if (btn) { btn.disabled = false; btn.textContent = 'Send'; btn.style.display = ''; }
+    if (stopBtn) stopBtn.style.display = 'none';
   }
 }
 
 // ── Gateway API Chat (fast, structured events) ──
 async function sendViaGatewayAPI(text, profile, sessionId, contentDiv, messagesDiv, startTime) {
-  const toolCards = new Map(); // call_id → DOM element
+  const toolCards = new Map();
   const bodyObj = { message: text, profile, stream: true };
   if (sessionId) bodyObj.session_id = sessionId;
+
   const response = await fetch('/api/gateway/responses', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': state.csrfToken || '' },
@@ -692,52 +728,56 @@ async function sendViaGatewayAPI(text, profile, sessionId, contentDiv, messagesD
     const err = await response.text();
     throw new Error(`Gateway ${response.status}: ${err}`);
   }
+
+  // Try to get session ID from response header first
+  const headerSessionId = response.headers.get('x-hermes-session-id') || '';
+  if (headerSessionId) state._currentChatSession = headerSessionId;
+
+  // Set up stop button
+  const stopBtn = document.getElementById('chat-stop-btn');
+  state._currentAbortController = null; // we use reader.cancel() instead
+
   let fullContent = '';
-  let responseId = null;
+  let fullReasoning = '';
   const reader = response.body.getReader();
+  state._currentStreamReader = reader; // for stop button
   const decoder = new TextDecoder();
   let buffer = '';
-  let done = false;
-  while (!done) {
-    const { done: d, value } = await reader.read();
-    if (d) { done = true; break; }
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
-    for (const line of lines) {
-      if (!line.startsWith('event: ') && !line.startsWith('data: ')) continue;
-      if (line.startsWith('event: ')) continue; // we parse from data lines
-      if (!line.startsWith('data: ')) continue;
-      try {
-        const evt = JSON.parse(line.slice(6));
-        const evtType = evt.type || '';
-        if (evtType === 'response.created') {
-          responseId = evt.response?.id || responseId;
-        } else if (evtType === 'response.output_text.delta') {
-          fullContent += evt.delta || '';
-          updateStreamContent(contentDiv, fullContent, toolCards, messagesDiv);
-        } else if (evtType === 'response.output_item.added') {
-          const item = evt.item || {};
-          if (item.type === 'tool_call') {
-            const cardEl = addToolCallCard(contentDiv, item.call_id || evt.item?.id, item.name, item.args);
-            toolCards.set(item.call_id || evt.item?.id, cardEl);
-            if (messagesDiv) messagesDiv.scrollTop = messagesDiv.scrollHeight;
-          }
-        } else if (evtType === 'hermes.tool.progress') {
-          updateToolProgress(toolCards, evt.name, evt.preview);
-        } else if (evtType === 'response.output_item.done') {
-          const item = evt.item || {};
-          if (item.type === 'tool_call') {
-            finalizeToolCard(toolCards, item.call_id || item.id, item.result || item.output || '');
-            if (messagesDiv) messagesDiv.scrollTop = messagesDiv.scrollHeight;
-          }
-        } else if (evtType === 'response.completed') {
-          responseId = evt.response?.id || responseId;
-          if (responseId) state._currentChatSession = responseId;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // Split on double-newline (SSE boundary)
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop() || '';
+
+      for (const part of parts) {
+        const lines = part.split('\n');
+        let dataLine = '';
+        for (const line of lines) {
+          if (line.startsWith('data: ')) dataLine = line.slice(6);
         }
-      } catch (parseErr) { /* skip unparseable lines */ }
+        if (!dataLine) continue;
+        try {
+          const evt = JSON.parse(dataLine);
+          handleGatewayEvent(evt, contentDiv, messagesDiv, toolCards);
+          if (evt.type === 'hci.session' && evt.session_id) {
+            state._currentChatSession = evt.session_id;
+          }
+          if (evt.type === 'response.output_text.delta') {
+            fullContent += evt.delta || '';
+          }
+        } catch (e) { /* skip */ }
+      }
     }
+  } catch (readErr) {
+    // User cancelled or connection error
+    console.log('[Chat] stream ended:', readErr.message);
   }
+
   // Finalize
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
   updateStreamContent(contentDiv, fullContent, toolCards, null, elapsed);
@@ -745,7 +785,38 @@ async function sendViaGatewayAPI(text, profile, sessionId, contentDiv, messagesD
   const elapsedEl = document.getElementById('chat-status-elapsed');
   if (stats) stats.textContent = state._currentChatSession || '—';
   if (elapsedEl) elapsedEl.textContent = elapsed + 's';
+  state._currentStreamReader = null;
   refreshChatSidebar();
+}function handleGatewayEvent(evt, contentDiv, messagesDiv, toolCards) {
+  const t = evt.type;
+  if (t === 'response.output_text.delta') {
+    updateStreamContent(contentDiv, null, toolCards, messagesDiv);
+  } else if (t === 'response.output_item.added') {
+    const item = evt.item || {};
+    if (item.type === 'function_call' || item.type === 'tool_call') {
+      const callId = item.call_id || item.id || ('tc_' + Date.now());
+      const cardEl = addToolCallCard(contentDiv, callId, item.name, item.arguments || item.args);
+      toolCards.set(callId, cardEl);
+      if (messagesDiv) messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    }
+  } else if (t === 'response.function_call_arguments.delta' || t === 'response.tool_call_arguments.delta') {
+    // Accumulate arguments for current tool call — update preview
+  } else if (t === 'hermes.tool.progress') {
+    updateToolProgress(toolCards, evt.name, evt.preview);
+  } else if (t === 'response.output_item.done') {
+    const item = evt.item || {};
+    if (item.type === 'function_call' || item.type === 'tool_call') {
+      const callId = item.call_id || item.id;
+      const result = item.result || item.output || '';
+      finalizeToolCard(toolCards, callId, result);
+      if (messagesDiv) messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    }
+  } else if (t === 'response.completed') {
+    if (evt.response?.id) {
+      // Don't overwrite session_id from hci.session or header
+      if (!state._currentChatSession) state._currentChatSession = evt.response.id;
+    }
+  }
 }
 
 // ── CLI Fallback Chat (legacy) ──
@@ -836,17 +907,35 @@ function finalizeToolCard(toolCards, callId, result) {
 
 function updateStreamContent(contentDiv, fullContent, toolCards, messagesDiv, elapsed) {
   if (!contentDiv) return;
-  // Keep existing tool cards, update text content
-  let html = renderChatContent(fullContent);
-  if (elapsed) {
-    html += `<div style="font-size:10px;color:var(--fg-subtle);margin-top:8px;">${elapsed}s</div>`;
-  } else {
-    html += '<span class="chat-cursor" style="animation:blink 1s infinite;">▊</span>';
+  // Use a dedicated text span for streaming content (avoid full DOM rebuild)
+  let textSpan = contentDiv.querySelector('#gw-stream-text');
+  if (!textSpan) {
+    textSpan = document.createElement('span');
+    textSpan.id = 'gw-stream-text';
+    // Insert after any existing tool cards
+    const lastCard = contentDiv.querySelector('.tool-call-card:last-of-type');
+    if (lastCard && lastCard.nextSibling) {
+      contentDiv.insertBefore(textSpan, lastCard.nextSibling);
+    } else if (lastCard) {
+      lastCard.after(textSpan);
+    } else {
+      contentDiv.prepend(textSpan);
+    }
   }
-  // Rebuild: tool cards + text
-  const existingCards = contentDiv.querySelectorAll('.tool-call-card');
-  const cardHtml = Array.from(existingCards).map(c => c.outerHTML).join('');
-  contentDiv.innerHTML = cardHtml + html;
+  if (fullContent !== null && fullContent !== undefined) {
+    let html = renderChatContent(fullContent);
+    if (elapsed) {
+      html += `<div style="font-size:10px;color:var(--fg-subtle);margin-top:8px;">${elapsed}s</div>`;
+    } else {
+      html += '<span class="chat-cursor" style="animation:blink 1s infinite;">▊</span>';
+    }
+    textSpan.innerHTML = html;
+  } else if (elapsed) {
+    // Finalize: just add elapsed time
+    const cursor = textSpan.querySelector('.chat-cursor');
+    if (cursor) cursor.remove();
+    textSpan.insertAdjacentHTML('beforeend', `<div style="font-size:10px;color:var(--fg-subtle);margin-top:8px;">${elapsed}s</div>`);
+  }
   if (messagesDiv) messagesDiv.scrollTop = messagesDiv.scrollHeight;
 }
 

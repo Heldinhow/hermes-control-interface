@@ -2938,40 +2938,80 @@ app.post('/api/doctor', requireRole('admin'), async (req, res) => {
 });
 
 // ── Backup & Import ──
-app.post('/api/backup/create', requireRole('admin'), async (req, res) => {
-  try {
-    const output = await shell('hermes backup -o /tmp/hermes-backup.zip 2>&1', '60s');
-    if (output.includes('error') || output.includes('Error')) {
-      return res.json({ ok: false, error: output.trim() });
+app.post('/api/backup/create', requireRole('admin'), (req, res) => {
+  // SSE response — stream hermes backup progress
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+  });
+  const outPath = `/tmp/hermes-backup-${Date.now()}.zip`;
+  const proc = spawn('bash', ['-lc', `hermes backup -o ${outPath} 2>&1`], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, HERMES_HOME: path.join(os.homedir(), '.hermes') },
+  });
+  let fullOutput = '';
+  proc.stdout.on('data', (chunk) => {
+    const text = chunk.toString();
+    fullOutput += text;
+    text.split('\n').filter(Boolean).forEach(line => {
+      res.write(`data: ${JSON.stringify({ type: 'progress', line })}\n\n`);
+    });
+  });
+  proc.stderr.on('data', (chunk) => {
+    const text = chunk.toString();
+    fullOutput += text;
+    res.write(`data: ${JSON.stringify({ type: 'progress', line: text.trim() })}\n\n`);
+  });
+  proc.on('close', (code) => {
+    if (!fs.existsSync(outPath)) {
+      res.write(`data: ${JSON.stringify({ type: 'error', message: 'Backup file not created', output: fullOutput.trim() })}\n\n`);
+      return res.end();
     }
     const filename = 'hermes-backup-' + new Date().toISOString().slice(0, 10) + '.zip';
-    res.json({ ok: true, path: '/tmp/hermes-backup.zip', filename, output: output.trim() });
-  } catch (e) {
-    res.json({ ok: false, error: e.message });
-  }
+    audit(req.hciUser?.username || 'unknown', req.hciUser?.role || 'unknown', 'BACKUP_CREATE', outPath);
+    res.write(`data: ${JSON.stringify({ type: 'done', path: outPath, filename, output: fullOutput.trim() })}\n\n`);
+    res.end();
+  });
 });
 
 app.post('/api/backup/import', requireRole('admin'), (req, res) => {
-  // Inline multer for this route
   const multer = require('multer');
-  const upload = multer({ dest: '/tmp/', limits: { fileSize: 500 * 1024 * 1024 } });
-  upload.single('backup')(req, res, async (err) => {
-    if (err || !req.file) return res.json({ ok: false, error: err?.message || 'No file uploaded' });
-    try {
-      const zipPath = req.file.path;
-      const output = await new Promise((resolve, reject) => {
-        execFile('hermes', ['import', '--force', zipPath], { timeout: 60000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
-          resolve(err ? (stdout || err.message) : stdout);
-        });
-      });
-      try { fs.unlinkSync(zipPath); } catch {}
-      if (output.includes('error') || output.includes('Error')) {
-        return res.json({ ok: false, error: output.trim() });
-      }
-      res.json({ ok: true, output: output.trim() });
-    } catch (e) {
-      res.json({ ok: false, error: e.message });
+  const upload = multer({ dest: '/tmp/', limits: { fileSize: 5 * 1024 * 1024 * 1024 } }); // 5GB
+  upload.single('backup')(req, res, (multerErr) => {
+    if (multerErr || !req.file) {
+      return res.json({ ok: false, error: multerErr?.message || 'No file uploaded' });
     }
+    const zipPath = req.file.path;
+    // SSE response — stream hermes import progress
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+    });
+    const proc = spawn('bash', ['-lc', `hermes import ${zipPath} --force 2>&1`], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, HERMES_HOME: path.join(os.homedir(), '.hermes') },
+    });
+    let fullOutput = '';
+    proc.stdout.on('data', (chunk) => {
+      const text = chunk.toString();
+      fullOutput += text;
+      text.split('\n').filter(Boolean).forEach(line => {
+        res.write(`data: ${JSON.stringify({ type: 'progress', line })}\n\n`);
+      });
+    });
+    proc.stderr.on('data', (chunk) => {
+      const text = chunk.toString();
+      fullOutput += text;
+      res.write(`data: ${JSON.stringify({ type: 'progress', line: text.trim() })}\n\n`);
+    });
+    proc.on('close', (code) => {
+      try { fs.unlinkSync(zipPath); } catch {}
+      audit(req.hciUser?.username || 'unknown', req.hciUser?.role || 'unknown', 'BACKUP_IMPORT', req.file.originalname);
+      res.write(`data: ${JSON.stringify({ type: 'done', output: fullOutput.trim() })}\n\n`);
+      res.end();
+    });
   });
 });
 

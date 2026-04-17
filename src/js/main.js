@@ -3027,22 +3027,89 @@ async function deleteUser(username) {
 
 async function createBackup() {
   if (!await customConfirm('Create a system backup? This may take a moment.', 'Create Backup')) return;
+
+  // Show progress modal
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.style.display = 'flex';
+  overlay.innerHTML = `
+    <div class="modal-card" style="width:520px;max-width:90vw;">
+      <div class="modal-title">📦 Creating Backup</div>
+      <div id="backup-progress" style="margin:12px 0;font-family:var(--font-mono,monospace);font-size:12px;line-height:1.8;max-height:300px;overflow-y:auto;background:var(--bg-inset);border-radius:6px;padding:12px;color:var(--fg-muted);white-space:pre-wrap;"></div>
+      <div id="backup-status" style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">Starting...</div>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  const progressEl = document.getElementById('backup-progress');
+  const statusEl = document.getElementById('backup-status');
+
   try {
-    showToast('Creating backup...', 'info');
     const csrfToken = state.csrfToken || '';
-    const res = await api('/api/backup/create', { method: 'POST', headers: { 'X-CSRF-Token': csrfToken } });
-    if (res.ok && res.path) {
-      const a = document.createElement('a');
-      a.href = `/api/backup/download?path=${encodeURIComponent(res.path)}`;
-      a.download = res.filename || 'backup.zip';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      showToast('Backup downloaded', 'success');
-    } else {
-      showToast(res.error || 'Backup failed', 'error');
+    const res = await fetch('/api/backup/create', {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': csrfToken },
+      credentials: 'include',
+    });
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let lastLine = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        try {
+          const data = JSON.parse(line.slice(6));
+          if (data.type === 'progress') {
+            const text = data.line.replace(/\r/g, '');
+            // Parse progress like "500/6663 files ..."
+            if (text.includes('files')) {
+              lastLine = text;
+              statusEl.textContent = text;
+              statusEl.style.color = 'var(--accent)';
+            }
+            progressEl.textContent += text + '\n';
+            progressEl.scrollTop = progressEl.scrollHeight;
+          } else if (data.type === 'done') {
+            statusEl.textContent = '✅ Backup complete!';
+            statusEl.style.color = 'var(--success)';
+            // Show summary
+            const summary = data.output.split('\n').filter(l =>
+              l.includes('Backup complete') || l.includes('Files:') || l.includes('Compressed:') || l.includes('Time:') || l.includes('Original:')
+            ).join('\n');
+            if (summary) progressEl.textContent += '\n' + summary;
+            progressEl.scrollTop = progressEl.scrollHeight;
+            // Auto download
+            if (data.path) {
+              const a = document.createElement('a');
+              a.href = `/api/backup/download?path=${encodeURIComponent(data.path)}`;
+              a.download = data.filename || 'backup.zip';
+              document.body.appendChild(a);
+              a.click();
+              a.remove();
+            }
+            // Close modal after 3s
+            setTimeout(() => { overlay.remove(); showToast('Backup downloaded', 'success'); }, 3000);
+          } else if (data.type === 'error') {
+            statusEl.textContent = '❌ ' + (data.message || 'Backup failed');
+            statusEl.style.color = 'var(--danger)';
+            if (data.output) progressEl.textContent += '\n' + data.output;
+            setTimeout(() => overlay.remove(), 5000);
+          }
+        } catch {}
+      }
     }
-  } catch (e) { showToast('Backup failed: ' + e.message, 'error'); }
+  } catch (e) {
+    statusEl.textContent = '❌ Error: ' + e.message;
+    statusEl.style.color = 'var(--danger)';
+    setTimeout(() => overlay.remove(), 3000);
+  }
 }
 
 async function importBackup(input) {
@@ -3050,8 +3117,24 @@ async function importBackup(input) {
   const file = input.files[0];
   if (!file.name.endsWith('.zip')) return showToast('Please select a .zip file', 'error');
   if (!await customConfirm('Import backup? This will restore data from the backup file.', 'Import Backup')) { input.value = ''; return; }
+
+  // Show progress modal
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.style.display = 'flex';
+  overlay.innerHTML = `
+    <div class="modal-card" style="width:520px;max-width:90vw;">
+      <div class="modal-title">📥 Importing Backup</div>
+      <div style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">File: ${escapeHtml(file.name)} (${(file.size / 1024 / 1024).toFixed(1)} MB)</div>
+      <div id="import-progress" style="margin:12px 0;font-family:var(--font-mono,monospace);font-size:12px;line-height:1.8;max-height:300px;overflow-y:auto;background:var(--bg-inset);border-radius:6px;padding:12px;color:var(--fg-muted);white-space:pre-wrap;"></div>
+      <div id="import-status" style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">Uploading file...</div>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  const progressEl = document.getElementById('import-progress');
+  const statusEl = document.getElementById('import-status');
+
   try {
-    showToast('Importing backup...', 'info');
     const csrfToken = state.csrfToken || '';
     const formData = new FormData();
     formData.append('backup', file);
@@ -3061,13 +3144,66 @@ async function importBackup(input) {
       body: formData,
       credentials: 'include',
     });
-    const data = await res.json();
-    if (data.ok) {
-      showToast('Backup imported successfully', 'success');
-    } else {
-      showToast(data.error || 'Import failed', 'error');
+
+    // Check if response is SSE or JSON (fallback for multer errors)
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      const data = await res.json();
+      statusEl.textContent = data.ok ? '✅ Import complete!' : '❌ ' + (data.error || 'Import failed');
+      statusEl.style.color = data.ok ? 'var(--success)' : 'var(--danger)';
+      setTimeout(() => overlay.remove(), 3000);
+      input.value = '';
+      return;
     }
-  } catch (e) { showToast('Import failed: ' + e.message, 'error'); }
+
+    // SSE streaming
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        try {
+          const data = JSON.parse(line.slice(6));
+          if (data.type === 'progress') {
+            const text = data.line.replace(/\r/g, '');
+            if (text.includes('files')) {
+              statusEl.textContent = text;
+              statusEl.style.color = 'var(--accent)';
+            }
+            progressEl.textContent += text + '\n';
+            progressEl.scrollTop = progressEl.scrollHeight;
+          } else if (data.type === 'done') {
+            statusEl.textContent = '✅ Import complete!';
+            statusEl.style.color = 'var(--success)';
+            // Show summary
+            const summary = data.output.split('\n').filter(l =>
+              l.includes('Import complete') || l.includes('files restored') || l.includes('Target:') || l.includes('Profile')
+            ).join('\n');
+            if (summary) progressEl.textContent += '\n' + summary;
+            progressEl.scrollTop = progressEl.scrollHeight;
+            setTimeout(() => { overlay.remove(); showToast('Backup imported successfully', 'success'); }, 4000);
+          } else if (data.type === 'error') {
+            statusEl.textContent = '❌ ' + (data.message || 'Import failed');
+            statusEl.style.color = 'var(--danger)';
+            if (data.output) progressEl.textContent += '\n' + data.output;
+            setTimeout(() => overlay.remove(), 5000);
+          }
+        } catch {}
+      }
+    }
+  } catch (e) {
+    statusEl.textContent = '❌ Error: ' + e.message;
+    statusEl.style.color = 'var(--danger)';
+    setTimeout(() => overlay.remove(), 3000);
+  }
   input.value = '';
 }
 

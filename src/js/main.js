@@ -2845,7 +2845,29 @@ async function loadAuditLogPage() {
     const el = document.getElementById('audit-log-page');
     if (data.ok && data.entries) {
       const recent = data.entries.slice(-50).reverse();
-      el.innerHTML = recent.map(e => `<div style="font-size:11px;padding:4px 0;border-bottom:1px solid var(--border);color:var(--fg-muted);font-family:var(--font);">${escapeHtml(e)}</div>`).join('');
+      el.innerHTML = recent.map(e => {
+        // Parse: [2026-04-17T22:30:00Z] bayendor admin LOGIN success from 203.128.x.x
+        const m = e.match(/\[(.+?)\]\s+(\S+)\s+(\S+)\s+(\S+)\s+(.+)/);
+        if (m) {
+          const [, ts, user, role, action, detail] = m;
+          const actionColors = {
+            'LOGIN': '#34d399', 'LOGOUT': '#fbbf24', 'USER_CREATE': '#4ecdc4',
+            'USER_DELETE': '#ff6b6b', 'USER_UPDATE': '#a78bfa', 'PASSWORD_RESET': '#ff6b6b',
+            'PASSWORD_CHANGE': '#fbbf24', 'CONFIG_UPDATE': '#a78bfa', 'KEY_REVEAL': '#ff6b6b',
+            'BACKUP_CREATE': '#34d399', 'BACKUP_IMPORT': '#4ecdc4', 'UPDATE': '#4ecdc4',
+            'RESTART': '#fbbf24', 'DOCTOR': '#a78bfa',
+          };
+          const color = actionColors[action] || '#4ecdc4';
+          return `<div style="font-size:11px;padding:4px 0;border-bottom:1px solid var(--border);font-family:var(--font);">
+            <span style="color:var(--fg-subtle);">[${new Date(ts).toLocaleString()}]</span>
+            <span style="color:var(--gold,#ffac02);font-weight:600;">${escapeHtml(user)}</span>
+            <span style="color:var(--fg-subtle);font-size:10px;">${escapeHtml(role)}</span>
+            <span style="color:${color};font-weight:600;">${escapeHtml(action)}</span>
+            <span style="color:var(--fg-muted);">${escapeHtml(detail)}</span>
+          </div>`;
+        }
+        return `<div style="font-size:11px;padding:4px 0;border-bottom:1px solid var(--border);color:var(--fg-muted);font-family:var(--font);">${escapeHtml(e)}</div>`;
+      }).join('');
     } else {
       el.innerHTML = '<div class="stat-row"><span class="stat-label">No audit entries</span></div>';
     }
@@ -2925,18 +2947,11 @@ async function loadMaintenance(container) {
           <button class="btn btn-ghost" onclick="showCreateUser()">+ Create User</button>
         </div>
       </div>
-      <div class="card">
-        <div class="card-title">Audit Log</div>
-        <div id="audit-log"><div class="loading">Loading audit...</div></div>
-      </div>
     </div>
   `;
 
   // Load users
   loadUsers();
-
-  // Load audit
-  loadAudit();
 
   // Load version
   try {
@@ -3313,8 +3328,25 @@ async function showCreateUser() {
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+  // Permission groups (same as edit user)
+  const permGroups = [
+    { label: 'Sessions', perms: ['sessions.view', 'sessions.messages', 'sessions.delete'] },
+    { label: 'Chat', perms: ['chat.use', 'chat.manage'] },
+    { label: 'Logs & Usage', perms: ['logs.view', 'usage.view', 'usage.export'] },
+    { label: 'Gateway', perms: ['gateway.view', 'gateway.control'] },
+    { label: 'Config', perms: ['config.view', 'config.edit'] },
+    { label: 'Secrets', perms: ['secrets.view', 'secrets.reveal', 'secrets.edit'] },
+    { label: 'Skills', perms: ['skills.browse', 'skills.install'] },
+    { label: 'Cron', perms: ['cron.view', 'cron.manage'] },
+    { label: 'Files', perms: ['files.read', 'files.write'] },
+    { label: 'Terminal', perms: ['terminal'] },
+    { label: 'Users', perms: ['users.view', 'users.manage'] },
+    { label: 'System', perms: ['system.update', 'system.backup', 'system.doctor', 'system.restart'] },
+  ];
+
   overlay.innerHTML = `
-    <div class="modal-card" style="max-width:550px;max-height:85vh;overflow-y:auto;">
+    <div class="modal-card" style="max-width:600px;max-height:85vh;overflow-y:auto;">
       <div class="modal-title">Create User</div>
       <form id="create-user-form">
         <div style="margin-bottom:10px;">
@@ -3340,17 +3372,26 @@ async function showCreateUser() {
         <div style="margin-bottom:10px;">
           <label style="font-size:11px;color:var(--fg-muted);display:block;margin-bottom:6px;">Role</label>
           <div style="display:flex;gap:6px;margin-bottom:10px;">
-            <button type="button" class="btn btn-ghost btn-sm" id="role-admin-btn" onclick="applyCreatePreset('admin', this)">Admin</button>
-            <button type="button" class="btn btn-ghost btn-sm" id="role-viewer-btn" onclick="applyCreatePreset('viewer', this)">Viewer</button>
-            <button type="button" class="btn btn-ghost btn-sm" id="role-custom-btn" onclick="applyCreatePreset('custom', this)">Custom</button>
+            <button type="button" class="btn btn-ghost btn-sm" onclick="applyCreatePreset('admin', this)">Admin</button>
+            <button type="button" class="btn btn-ghost btn-sm" onclick="applyCreatePreset('viewer', this)">Viewer</button>
+            <button type="button" class="btn btn-ghost btn-sm" onclick="applyCreatePreset('custom', this)">Custom</button>
           </div>
           <input type="hidden" name="role" value="viewer" />
           <div id="perm-custom-list" style="display:none;">
-            <div style="font-size:11px;color:var(--fg-muted);margin-bottom:6px;">Select permissions:</div>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:12px;" id="perm-checkboxes">
-              ${['sessions.view','sessions.messages','sessions.delete','chat.use','chat.manage','logs.view','usage.view','usage.export','gateway.view','gateway.control','config.view','config.edit','secrets.view','secrets.reveal','secrets.edit','skills.browse','skills.install','cron.view','cron.manage','files.read','files.write','terminal','users.view','users.manage','system.update','system.backup','system.doctor','system.restart'].map(p =>
-                `<label style="display:flex;align-items:center;gap:4px;cursor:pointer;padding:2px 0;"><input type="checkbox" name="perm" value="${p}" /> ${p}</label>`
-              ).join('')}
+            <div style="font-size:11px;color:var(--fg-muted);margin-bottom:6px;">Permissions:</div>
+            <div style="max-height:300px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius);padding:8px;background:var(--bg-input);">
+              ${permGroups.map(g => `
+                <div style="margin-bottom:8px;">
+                  <div style="font-size:10px;font-weight:600;color:var(--gold,#ffac02);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;">${g.label}</div>
+                  <div style="display:grid;grid-template-columns:1fr 1fr;gap:2px;font-size:11px;">
+                    ${g.perms.map(p => `
+                      <label style="display:flex;align-items:center;gap:4px;cursor:pointer;padding:2px 4px;border-radius:3px;" onmouseover="this.style.background='var(--bg-panel-hover)'" onmouseout="this.style.background='transparent'">
+                        <input type="checkbox" name="perm" value="${p}" /> ${p}
+                      </label>
+                    `).join('')}
+                  </div>
+                </div>
+              `).join('')}
             </div>
           </div>
         </div>
@@ -3364,6 +3405,7 @@ async function showCreateUser() {
   document.body.appendChild(overlay);
 
   // Apply preset for create user modal
+  const form = overlay.querySelector('#create-user-form');
   window.applyCreatePreset = function(role, btn) {
     form.querySelector('[name=role]').value = role;
     const customList = document.getElementById('perm-custom-list');
@@ -3384,11 +3426,10 @@ async function showCreateUser() {
   };
 
   // Set default viewer preset as active
-  const viewerBtn = document.getElementById('role-viewer-btn');
+  const viewerBtn = overlay.querySelector('[onclick="applyCreatePreset(\'viewer\', this)"]');
   if (viewerBtn) viewerBtn.classList.add('btn-primary');
 
   // Password match check
-  const form = overlay.querySelector('#create-user-form');
   const pwInput = form.querySelector('[name=password]');
   const confInput = form.querySelector('[name=confirm]');
   const msgEl = overlay.querySelector('#pw-match-msg');
@@ -3434,7 +3475,9 @@ async function createUser(username, password, role, permissions) {
     });
     if (res.ok) {
       showToast(`User ${username} created`, 'success');
+      // Refresh users list wherever it's visible
       loadUsers();
+      if (state.page === 'users') loadUsersPage(document.getElementById('page-users'));
     } else {
       showToast(`Failed: ${res.error}`, 'error');
     }
@@ -3570,31 +3613,71 @@ async function showEditUser(username) {
 
 // Reset password sub-modal
 async function showResetPassword(username) {
-  const result = await showModal({
-    title: `Reset Password: ${username}`,
-    message: 'Enter a new password for this user.',
-    inputs: [{ placeholder: 'New password (min 8 chars)', name: 'password', type: 'password' }],
-    buttons: [
-      { text: 'Cancel', value: false },
-      { text: 'Reset Password', value: true, primary: true },
-    ],
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+  overlay.innerHTML = `
+    <div class="modal-card" style="max-width:400px;">
+      <div class="modal-title">Reset Password: ${escapeHtml(username)}</div>
+      <form id="reset-pw-form">
+        <div style="margin-bottom:10px;">
+          <label style="font-size:11px;color:var(--fg-muted);display:block;margin-bottom:4px;">New Password</label>
+          <div style="position:relative;">
+            <input class="modal-input" name="password" type="password" placeholder="Min 8 characters" autocomplete="new-password" required style="padding-right:36px;" />
+            <button type="button" onclick="togglePwVis(this)" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--fg-muted);cursor:pointer;font-size:14px;">👁</button>
+          </div>
+        </div>
+        <div style="margin-bottom:10px;">
+          <label style="font-size:11px;color:var(--fg-muted);display:block;margin-bottom:4px;">Confirm Password</label>
+          <div style="position:relative;">
+            <input class="modal-input" name="confirm" type="password" placeholder="Re-enter password" autocomplete="new-password" required style="padding-right:36px;" />
+            <button type="button" onclick="togglePwVis(this)" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--fg-muted);cursor:pointer;font-size:14px;">👁</button>
+          </div>
+          <div id="reset-pw-match-msg" style="font-size:11px;margin-top:4px;min-height:16px;"></div>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-ghost" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+          <button type="submit" class="btn btn-primary" style="color:var(--coral,#ff6b6b);">Reset Password</button>
+        </div>
+      </form>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  // Password match check
+  const form = overlay.querySelector('#reset-pw-form');
+  const pwInput = form.querySelector('[name=password]');
+  const confInput = form.querySelector('[name=confirm]');
+  const msgEl = overlay.querySelector('#reset-pw-match-msg');
+  const checkMatch = () => {
+    if (!confInput.value) { msgEl.textContent = ''; return; }
+    msgEl.textContent = pwInput.value === confInput.value ? '✓ Passwords match' : '✗ Passwords do not match';
+    msgEl.style.color = pwInput.value === confInput.value ? 'var(--green)' : 'var(--red)';
+  };
+  pwInput.addEventListener('input', checkMatch);
+  confInput.addEventListener('input', checkMatch);
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const newPw = pwInput.value;
+    const confirmPw = confInput.value;
+    if (newPw.length < 8) return showToast('Password must be at least 8 chars', 'error');
+    if (newPw !== confirmPw) return showToast('Passwords do not match', 'error');
+    try {
+      const csrfToken = state.csrfToken || '';
+      const res = await api(`/api/users/${encodeURIComponent(username)}/reset-password`, {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': csrfToken, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ new_password: newPw }),
+      });
+      if (res.ok) {
+        showToast(`Password reset for ${username}`, 'success');
+        overlay.remove();
+      } else {
+        showToast(`Failed: ${res.error}`, 'error');
+      }
+    } catch (e) { showToast(`Failed: ${e.message}`, 'error'); }
   });
-  if (!result?.action || !result.inputs?.[0]) return;
-  const newPw = result.inputs[0];
-  if (newPw.length < 8) return showToast('Password must be at least 8 chars', 'error');
-  try {
-    const csrfToken = state.csrfToken || '';
-    const res = await api(`/api/users/${encodeURIComponent(username)}/reset-password`, {
-      method: 'POST',
-      headers: { 'X-CSRF-Token': csrfToken, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ new_password: newPw }),
-    });
-    if (res.ok) {
-      showToast(`Password reset for ${username}`, 'success');
-    } else {
-      showToast(`Failed: ${res.error}`, 'error');
-    }
-  } catch (e) { showToast(`Failed: ${e.message}`, 'error'); }
 }
 
 // ============================================

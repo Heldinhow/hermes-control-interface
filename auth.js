@@ -120,6 +120,56 @@ function changePassword(username, currentPassword, newPassword) {
   return { ok: true };
 }
 
+// ============================================
+// Permissions
+// ============================================
+const PERMISSIONS = [
+  'sessions.view','sessions.messages','sessions.delete',
+  'chat.use','chat.manage',
+  'logs.view','usage.view','usage.export',
+  'gateway.view','gateway.control',
+  'config.view','config.edit',
+  'secrets.view','secrets.reveal','secrets.edit',
+  'skills.browse','skills.install',
+  'cron.view','cron.manage',
+  'files.read','files.write',
+  'terminal',
+  'users.view','users.manage',
+  'system.update','system.backup','system.doctor','system.restart',
+];
+
+const PRESET_PERMISSIONS = {
+  admin: PERMISSIONS.reduce((acc, p) => { acc[p] = true; return acc; }, {}),
+  viewer: {
+    'sessions.view': true, 'sessions.messages': true, 'chat.use': true,
+    'logs.view': true, 'usage.view': true, 'skills.browse': true, 'files.read': true,
+  },
+  custom: {},
+};
+
+function resolvePermissions(role, permissions) {
+  if (role === 'admin') return { ...PRESET_PERMISSIONS.admin };
+  if (role === 'viewer') return { ...PRESET_PERMISSIONS.viewer };
+  if (role === 'custom' && permissions) return { ...permissions };
+  return { ...PRESET_PERMISSIONS.viewer };
+}
+
+function updateUserPermissions(username, role, permissions) {
+  const data = loadUsers();
+  const u = data.users.find(x => x.username === username);
+  if (!u) return { ok: false, error: 'User not found' };
+  if (!['admin', 'viewer', 'custom'].includes(role)) return { ok: false, error: 'Invalid role' };
+  u.role = role;
+  if (role === 'custom') {
+    u.permissions = permissions || {};
+  } else {
+    delete u.permissions;
+  }
+  saveUsers(data);
+  audit('system', 'admin', 'USER_UPDATE', `updated ${username} role to ${role}`);
+  return { ok: true };
+}
+
 function resetUserPassword(username, newPassword, adminUser) {
   if (newPassword.length < 8) return { ok: false, error: 'Password must be at least 8 characters' };
   const data = loadUsers();
@@ -224,6 +274,10 @@ module.exports = {
   resetUserPassword,
   sanitizeUsername,
   listUsers,
+  updateUserPermissions,
+  PERMISSIONS,
+  PRESET_PERMISSIONS,
+  resolvePermissions,
   audit,
   getAuditLog,
   loadNotifications,

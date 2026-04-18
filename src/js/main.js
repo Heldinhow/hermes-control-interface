@@ -647,19 +647,6 @@ function renderChatMessage(msg) {
   return div;
 }
 
-function generateChatSessionId() {
-  const now = new Date();
-  // Format: YYYYMMDD_HHMMSS_RAND (matches hermes CLI session ID format)
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  const day = String(now.getDate()).padStart(2, '0');
-  const hours = String(now.getHours()).padStart(2, '0');
-  const mins = String(now.getMinutes()).padStart(2, '0');
-  const secs = String(now.getSeconds()).padStart(2, '0');
-  const rand = Math.random().toString(36).slice(2, 6);
-  return `${year}${month}${day}_${hours}${mins}${secs}_${rand}`;
-}
-
 function newChatSession() {
   // Option B: Don't generate session ID yet — let backend create it on first message
   state._currentChatSession = null;
@@ -714,16 +701,6 @@ function stopChatStream() {
   // Remove cursor
   const cursor = document.querySelector('.chat-cursor');
   if (cursor) cursor.remove();
-}
-
-// Filter sessions in sidebar by search text
-function filterChatSessions(query) {
-  const items = document.querySelectorAll('.chat-session-item');
-  const q = (query || '').toLowerCase().trim();
-  items.forEach(item => {
-    const title = (item.dataset.title || item.textContent || '').toLowerCase();
-    item.style.display = (!q || title.includes(q)) ? '' : 'none';
-  });
 }
 
 async function renameChatSession(sessionId = 0) {
@@ -1249,40 +1226,6 @@ async function loadHome(container) {
 
   } catch (e) {
     document.getElementById('home-cards').innerHTML = `<div class="card"><div class="card-title">Error</div><div class="error-msg">${e.message}</div></div>`;
-  }
-}
-
-async function loadHCIPanel() {
-  const el = document.getElementById('home-hci-panel');
-  if (!el) return;
-  try {
-    const [healthRes, pkgRes] = await Promise.all([
-      api('/api/health'),
-      api('/api/system/health'),
-    ]);
-    const hciVersion = (pkgRes?.hci_version) || '—';
-    const hermesVersion = (pkgRes?.hermes_version) || '—';
-    const nodeVersion = (pkgRes?.node_version) || '—';
-    const cpu = (pkgRes?.cpu) || '—';
-    const ram = (pkgRes?.ram) || '—';
-    const isHealthy = healthRes?.ok || false;
-
-    el.innerHTML = `
-      <div class="card-title">HCI</div>
-      <div class="stat-row"><span class="stat-label">Version</span><span class="stat-value">${escapeHtml(hciVersion)}</span></div>
-      <div class="stat-row"><span class="stat-label">Hermes</span><span class="stat-value">${escapeHtml(hermesVersion)}</span></div>
-      <div class="stat-row"><span class="stat-label">Node</span><span class="stat-value">${escapeHtml(nodeVersion)}</span></div>
-      <div class="stat-row"><span class="stat-label">CPU</span><span class="stat-value">${escapeHtml(cpu)}%</span></div>
-      <div class="stat-row"><span class="stat-label">RAM</span><span class="stat-value">${escapeHtml(ram)}</span></div>
-      <div class="stat-row"><span class="stat-label">Status</span><span class="stat-value ${isHealthy ? 'status-ok' : 'status-off'}">${isHealthy ? '● Healthy' : '○ Error'}</span></div>
-      <div style="display:flex;gap:6px;margin-top:12px;flex-wrap:wrap;">
-        <button class="btn btn-ghost btn-sm" onclick="hcirestart()">⟲ Restart</button>
-        <button class="btn btn-ghost btn-sm" onclick="hciupdate()">↑ Update</button>
-        <button class="btn btn-ghost btn-sm" onclick="hcidoctor()">♡ Health Check</button>
-      </div>
-    `;
-  } catch (e) {
-    el.innerHTML = `<div class="card-title">HCI</div><div class="error-msg">${e.message}</div>`;
   }
 }
 
@@ -5530,14 +5473,6 @@ function setLogsMode(mode) {
 function debounceLogsSearch() {
   clearTimeout(state._logsDebounce);
   state._logsDebounce = setTimeout(refreshLogs, 400);
-}
-
-// Start auto refresh on load
-function initLogsAutoRefresh() {
-  if (state._logsAutoRefresh) {
-    startLogsAutoRefresh();
-    updateLogsAutoBtn();
-  }
 }
 
 window.loadUsage = loadUsage;

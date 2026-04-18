@@ -6,7 +6,6 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
-const bcrypt = require('bcrypt');
 const { execFile, spawn } = require('child_process');
 const pty = require('node-pty');
 const { WebSocketServer } = require('ws');
@@ -124,7 +123,7 @@ const SYSTEMD_USER_FLAG = IS_ROOT ? '' : '--user';
 if (!IS_ROOT && !process.env.XDG_RUNTIME_DIR) {
   const uid = process.getuid();
   const runtimeDir = `/run/user/${uid}`;
-  if (require('fs').existsSync(runtimeDir)) {
+  if (fs.existsSync(runtimeDir)) {
     process.env.XDG_RUNTIME_DIR = runtimeDir;
   }
 }
@@ -271,7 +270,6 @@ app.use('/plugins/:id', (req, res, next) => {
   express.static(plugin.uiPath, { maxAge: '1h' })(req, res, next);
 });
 
-const sessions = new Map();
 const events = [];
 
 // ── Chat System — uses real hermes sessions from state.db ──
@@ -621,11 +619,6 @@ function hmac(value) {
   return crypto.createHmac('sha256', CONTROL_SECRET).update(value).digest('hex');
 }
 
-function createAuthToken() {
-  const ts = Date.now().toString();
-  return `${ts}.${hmac(ts)}`;
-}
-
 function deriveCsrfToken(authToken) {
   return hmac('csrf:' + authToken);
 }
@@ -735,14 +728,6 @@ function formatBytes(bytes) {
     idx += 1;
   }
   return `${value.toFixed(value >= 10 || idx === 0 ? 0 : 1)} ${units[idx]}`;
-}
-
-function formatUptime(seconds) {
-  const s = Math.floor(seconds);
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = s % 60;
-  return `${h}h ${m}m ${sec}s`;
 }
 
 function trimTerminalBuffer(text, limit = 50000) {
@@ -1167,12 +1152,7 @@ async function getSessions() {
   if (hermesSidebarSessionsCache.data.length) {
     return hermesSidebarSessionsCache.data;
   }
-  return Array.from(sessions.entries()).map(([id, messages]) => ({
-    id,
-    title: 'local chat',
-    preview: messages.at(-1)?.content?.slice(0, 90) || 'quiet',
-    lastActive: 'now',
-  }));
+  return [];
 }
 
 let hermesAllSessionsCache = { at: 0, data: [] };
@@ -1340,7 +1320,6 @@ function parseHermesInsights(raw) {
 
   // Parse model breakdown
   const modelBreakdown = [];
-  const modelRegex = /^[\w.-]+\s+\d+\s+([\d,]+)/gm;
   const modelLines = text.split('\n').filter(l => /^\s+[\w.-]+\s+\d+\s+[\d,]+/.test(l));
   for (const line of modelLines) {
     const parts = line.trim().split(/\s{2,}/);
@@ -2520,22 +2499,6 @@ app.post('/api/terminal/exec', terminalRateLimiter, requireAuth, requireCsrf, re
   }
 });
 
-app.post('/api/chat', requireAuth, requireCsrf, requirePerm('chat.use'), async (req, res) => {
-  const { message, sessionId = 'control-ui' } = req.body || {};
-  if (!message || typeof message !== 'string') return res.status(400).json({ error: 'message required' });
-  const history = sessions.get(sessionId) || [];
-  log('task.started', message.slice(0, 90));
-  try {
-    const response = 'chat endpoint active — use the terminal for AI responses';
-    const nextHistory = [...history, { role: 'user', content: message }, { role: 'assistant', content: response }].slice(-30);
-    sessions.set(sessionId, nextHistory);
-    log('task.completed', `chat: ${sessionId}`);
-    res.json({ response, sessionId });
-  } catch (error) {
-    log('task.error', error.message);
-    res.status(500).json({ error: error.message });
-  }
-});
 
 function parseDurationToMs(input) {
   const value = String(input || '').trim().toLowerCase();
@@ -3004,8 +2967,7 @@ app.get('/api/config/:profile', requireAuth, async (req, res) => {
       return res.json({ ok: false, error: 'Config not found' });
     }
     // Parse YAML
-    const yaml = require('yaml');
-    const config = yaml.parse(raw) || {};
+    const config = yaml.load(raw) || {};
     // Also return raw YAML for diff/preview
     res.json({ ok: true, config, raw_yaml: raw });
   } catch (e) {
@@ -3078,13 +3040,13 @@ app.put('/api/config/:profile', requireAuth, requireRole('admin'), async (req, r
     gatewayPorts = discoverGatewayPorts();
 
     // Convert to YAML with good formatting
-    const yaml = require('yaml');
-    const doc = new yaml.Document(newConfig);
+    const yamlLib = require('yaml');
+    const doc = new yamlLib.Document(newConfig);
     doc.commentBefore = ' Managed by Hermes Control Interface';
     const yamlStr = doc.toString();
 
     // Validate by parsing back
-    const parsed = yaml.parse(yamlStr);
+    const parsed = yamlLib.parse(yamlStr);
     if (!parsed || typeof parsed !== 'object') {
       return res.status(400).json({ ok: false, error: 'Generated YAML is invalid' });
     }
@@ -3641,8 +3603,8 @@ app.post('/api/update', requireRole('admin'), (req, res) => {
   // Watch for prompt file and auto-answer "Y"
   const answerInterval = setInterval(() => {
     try {
-      if (require('fs').existsSync(promptPath)) {
-        require('fs').writeFileSync(responsePath, 'Y');
+      if (fs.existsSync(promptPath)) {
+        fs.writeFileSync(responsePath, 'Y');
       }
     } catch {}
   }, 500);
@@ -3667,47 +3629,10 @@ app.post('/api/update', requireRole('admin'), (req, res) => {
   proc.on('close', (code) => {
     clearInterval(answerInterval);
     // Clean up IPC files
-    try { require('fs').unlinkSync(promptPath); } catch {}
-    try { require('fs').unlinkSync(responsePath); } catch {}
+    try { fs.unlinkSync(promptPath); } catch {}
+    try { fs.unlinkSync(responsePath); } catch {}
     res.write(`data: ${JSON.stringify({ type: 'done', output: fullOutput.trim() })}\n\n`);
     res.end();
-  });
-});
-
-// Backup — create and download zip
-app.post('/api/backup', requireRole('admin'), async (req, res) => {
-  try {
-    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    const outPath = `/tmp/hci-backup-${crypto.randomUUID()}.zip`;
-    const output = await shell(`hermes backup -o ${outPath} 2>&1`, '120s');
-    if (!fs.existsSync(outPath)) {
-      return res.json({ ok: false, error: 'Backup file not created', output });
-    }
-    audit(req.hciUser?.username || 'unknown', req.hciUser?.role || 'unknown', 'BACKUP_CREATE', outPath);
-    res.download(outPath, `hermes-backup-${ts}.zip`, (err) => {
-      fs.unlink(outPath, () => {}); // cleanup after download
-    });
-  } catch (e) {
-    res.json({ ok: false, error: e.message });
-  }
-});
-
-// Import — upload and restore from zip
-app.post('/api/import', requireRole('admin'), (req, res) => {
-  const multer = require('multer');
-  const upload = multer({ dest: '/tmp/', limits: { fileSize: 5 * 1024 * 1024 * 1024 } }); // 5GB
-  upload.single('backup')(req, res, async (err) => {
-    if (err) return res.json({ ok: false, error: err.message });
-    if (!req.file) return res.json({ ok: false, error: 'No file uploaded' });
-    try {
-      const output = await shell(`hermes import ${req.file.path} --force 2>&1`, '300s');
-      fs.unlink(req.file.path, () => {});
-      audit(req.hciUser?.username || 'unknown', req.hciUser?.role || 'unknown', 'BACKUP_IMPORT', req.file.originalname);
-      res.json({ ok: true, output });
-    } catch (e) {
-      fs.unlink(req.file.path, () => {});
-      res.json({ ok: false, error: e.message });
-    }
   });
 });
 

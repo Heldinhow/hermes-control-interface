@@ -81,39 +81,6 @@
   min-height: 0;
 }
 
-/* Sidebar session group headers */
-.chat-session-group {
-  padding: 6px 10px 4px;
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--fg-subtle);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-  user-select: none;
-}
-
-.chat-session-group .group-chevron {
-  font-size: 8px;
-  transition: transform 0.2s;
-}
-
-.chat-session-group.collapsed .group-chevron {
-  transform: rotate(-90deg);
-}
-
-.chat-session-group-items {
-  display: flex;
-  flex-direction: column;
-}
-
-.chat-session-group-items.collapsed {
-  display: none;
-}
-
 /* Session items */
 .chat-session-item {
   padding: 8px 10px;
@@ -166,43 +133,6 @@
   color: var(--teal);
   text-transform: uppercase;
   letter-spacing: 0.04em;
-}
-
-/* Session actions (inline rename/delete) */
-.chat-session-actions {
-  display: none;
-  position: absolute;
-  right: 8px;
-  top: 50%;
-  transform: translateY(-50%);
-  gap: 2px;
-  background: var(--bg-panel);
-  padding: 2px;
-  border-radius: var(--radius);
-  border: 1px solid var(--border);
-}
-
-.chat-session-item:hover .chat-session-actions {
-  display: flex;
-}
-
-.chat-session-actions button {
-  padding: 4px 6px;
-  font-size: 11px;
-  background: transparent;
-  border: none;
-  color: var(--fg-muted);
-  cursor: pointer;
-  border-radius: 4px;
-}
-
-.chat-session-actions button:hover {
-  background: var(--bg-panel-hover);
-  color: var(--fg);
-}
-
-.chat-session-actions button.delete:hover {
-  color: var(--coral);
 }
 
 /* Profile selector in sidebar */
@@ -901,12 +831,6 @@
   .chat-msg {
     max-width: 90%;
     padding: 10px 14px;
-  }
-
-  /* Larger tap targets for session actions */
-  .chat-session-actions button {
-    min-width: 36px;
-    min-height: 36px;
   }
 }
 

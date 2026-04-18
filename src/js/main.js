@@ -418,8 +418,8 @@ async function refreshChatSidebar() {
     // Filter sessions
     let filtered = activeFilter === 'all' ? sessions : sessions.filter(s => s._source === activeFilter);
 
-    // Sort by last activity (most recent first)
-    filtered.sort((a, b) => parseLastActive(b.lastActive) - parseLastActive(a.lastActive));
+    // Backend already sorts by last activity (most recent message timestamp),
+    // so no additional sort needed — preserve the order from the API.
 
     // Render flat list — no grouping
     const currentSid = state._currentChatSession;
@@ -720,7 +720,8 @@ async function renameChatSession(sessionId = 0) {
 async function deleteChatSession(sessionId = 0) {
   const sid = sessionId || state._currentChatSession;
   if (!sid) return showToast('No session selected', 'info');
-  if (!(await showModal({ title: 'Delete Session', message: 'Delete this session? This cannot be undone.', buttons: [{ text: 'Cancel', value: false }, { text: 'Delete', value: true, primary: true }] })?.action)) return;
+  const confirmResult = await showModal({ title: 'Delete Session', message: 'Delete this session? This cannot be undone.', buttons: [{ text: 'Cancel', value: false }, { text: 'Delete', value: true, primary: true }] });
+  if (!confirmResult?.action) return;
   try {
     const profile = document.getElementById('chat-profile')?.value || 'default';
     const r = await fetch(`/api/sessions/${encodeURIComponent(sid)}?profile=${encodeURIComponent(profile)}`, { method: 'DELETE', headers: { 'X-CSRF-Token': state.csrfToken || '' }, credentials: 'include' });

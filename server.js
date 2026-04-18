@@ -2783,6 +2783,10 @@ app.put('/api/config/:profile', requireAuth, requireRole('admin'), async (req, r
     // Write
     fs.writeFileSync(configPath, yamlStr + '\n');
 
+    // Force-refresh gateway ports after file write (don't rely on fs.watch timing)
+    gatewayPorts = discoverGatewayPorts();
+    console.log('[Gateway] Ports refreshed after config save:', gatewayPorts);
+
     audit(req.hciUser?.username || 'unknown', req.hciUser?.role || 'unknown', 'CONFIG_UPDATE', profile);
     res.json({ ok: true, backup: backupPath });
   } catch (e) {

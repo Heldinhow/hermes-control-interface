@@ -3651,7 +3651,7 @@ async function showCreateAgent() {
   const name = result.inputs[0] || '';
   const safeName = name.replace(/[^a-zA-Z0-9_-]/g, '').toLowerCase();
   if (!safeName) {
-    await customAlert('Invalid name. Use letters, numbers, hyphens, underscores.', 'Error');
+    await customAlert('Please enter an agent name first (letters, numbers, hyphens, underscores).', 'Name Required');
     return;
   }
 
@@ -3659,8 +3659,8 @@ async function showCreateAgent() {
 
   if (result.action === 'clone_from') {
     const sourceResult = await showModal({
-      title: 'Clone From',
-      message: 'Enter profile name to clone from:',
+      title: `Clone "${safeName}" From`,
+      message: `Clone settings from which profile?`,
       inputs: [{ placeholder: 'Source profile (e.g. david)', value: 'david' }],
       buttons: [
         { text: 'Cancel', value: null },
@@ -3668,7 +3668,11 @@ async function showCreateAgent() {
       ],
     });
     if (!sourceResult || sourceResult.action === null) return;
-    const source = sourceResult.inputs[0] || 'david';
+    const source = (sourceResult.inputs[0] || 'david').replace(/[^a-zA-Z0-9_-]/g, '');
+    if (!source) {
+      await customAlert('Invalid source profile name.', 'Error');
+      return;
+    }
     body.cloneArg = '--clone-from';
     body.cloneSource = source;
   }

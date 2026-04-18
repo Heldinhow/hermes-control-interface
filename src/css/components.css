@@ -169,9 +169,7 @@
 
 /* Home image card */
 .home-image-card {
-  background-image: url('../assets/hermes-agent-bg.jpg');
-  background-size: cover;
-  background-position: center;
+  background: var(--bg-card);
   min-height: 200px;
   border: 1px solid var(--border);
 }

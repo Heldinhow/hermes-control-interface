@@ -2205,10 +2205,10 @@ app.get('/api/gateway/:profile/health', requireAuth, async (req, res) => {
       }
     }
 
-    // Check 4: Profile routing (does gateway support this profile?)
-    checks.profile_supported = profile === 'default';
-    if (profile !== 'default') {
-      issues.push('Gateway API only supports default profile. Other profiles use CLI fallback (slower).');
+    // Check 4: Profile routing — each profile has its own gateway port
+    checks.profile_supported = !!port;
+    if (!port) {
+      issues.push('Gateway port not found for this profile. Check platforms.api_server.extra.port in config.yaml.');
     }
 
     // Check 5: Config exists

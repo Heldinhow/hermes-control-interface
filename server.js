@@ -2162,6 +2162,78 @@ app.get('/api/gateway/:profile/logs', requireAuth, async (req, res) => {
   }
 });
 
+// Gateway health check for a specific profile
+app.get('/api/gateway/:profile/health', requireAuth, async (req, res) => {
+  try {
+    const profile = sanitizeProfileName(req.params.profile) || 'default';
+    const port = gatewayPorts[profile];
+    const issues = [];
+    const checks = {};
+
+    // Check 1: Port discovered
+    checks.port_discovered = !!port;
+    if (!port) issues.push('Gateway port not configured in config.yaml (platforms.api_server.extra.port)');
+
+    // Check 2: Gateway process running
+    let gatewayRunning = false;
+    try {
+      const svcName = `hermes-gateway-${profile}`;
+      const status = (await shell(`systemctl is-active ${svcName} 2>&1`, '5s')).trim();
+      gatewayRunning = status === 'active';
+      checks.service_status = status;
+    } catch {}
+    if (!gatewayRunning) {
+      // Fallback: check if something is listening on the port
+      if (port) {
+        const listening = (await shell(`ss -tlnp | grep :${port}`, '5s')).trim();
+        checks.port_listening = !!listening;
+        if (!listening) issues.push(`Nothing listening on port ${port}`);
+      }
+    }
+
+    // Check 3: API responds
+    checks.api_reachable = false;
+    if (port) {
+      try {
+        const healthRes = await fetch(`http://127.0.0.1:${port}/health`, {
+          signal: AbortSignal.timeout(3000)
+        });
+        checks.api_reachable = healthRes.ok;
+        if (!healthRes.ok) issues.push(`Gateway API returned ${healthRes.status}`);
+      } catch (e) {
+        issues.push(`Gateway API unreachable: ${e.message}`);
+      }
+    }
+
+    // Check 4: Profile routing (does gateway support this profile?)
+    checks.profile_supported = profile === 'default';
+    if (profile !== 'default') {
+      issues.push('Gateway API only supports default profile. Other profiles use CLI fallback (slower).');
+    }
+
+    // Check 5: Config exists
+    const configPath = profile === 'default'
+      ? path.join(HERMES_HOME, 'config.yaml')
+      : path.join(HERMES_HOME, 'profiles', profile, 'config.yaml');
+    checks.config_exists = fs.existsSync(configPath);
+    if (!checks.config_exists) issues.push(`Config not found: ${configPath}`);
+
+    const healthy = checks.port_discovered && checks.api_reachable && checks.config_exists;
+
+    res.json({
+      ok: true,
+      profile,
+      port: port || null,
+      healthy,
+      checks,
+      issues,
+      gatewayMode: healthy ? 'Gateway API (fast)' : 'CLI fallback (slow)',
+    });
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
 // Unified Logs — all profiles, all sources, with filters
 app.get('/api/logs', requireAuth, requirePerm('logs.view'), async (req, res) => {
   try {

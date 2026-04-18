@@ -293,6 +293,18 @@ function loadGatewayApiKey() {
   return '';
 }
 
+// Resolve CORS origins for gateway config injection
+// Priority: HCI_CORS_ORIGINS env var → auto-detect from request → sensible defaults
+function resolveCorsOrigins(req) {
+  // If env var set, use it directly (comma-separated)
+  if (process.env.HCI_CORS_ORIGINS) return process.env.HCI_CORS_ORIGINS;
+  // Auto-detect from the incoming request origin
+  const origin = req?.headers?.origin || req?.get?.('origin') || '';
+  if (origin) return origin;
+  // Defaults: localhost common dev ports
+  return 'http://localhost:3000,http://localhost:5173,http://localhost:10272,http://127.0.0.1:3000,http://127.0.0.1:5173,http://127.0.0.1:10272';
+}
+
 // Dynamic profile → Gateway API port discovery
 // Scans ~/.hermes/config.yaml (default) + ~/.hermes/profiles/*/config.yaml
 function discoverGatewayPorts() {
@@ -2128,7 +2140,7 @@ app.post('/api/gateway/:profile/:action', requireCsrf, async (req, res) => {
                 host: '127.0.0.1',
                 port,
                 key: GATEWAY_API_KEY,
-                cors_origins: 'https://agent2.panji.me,https://agent.panji.me',
+                cors_origins: resolveCorsOrigins(req),
               },
             };
             fs.writeFileSync(confPath, yaml.dump(cfg, { lineWidth: 120 }));
@@ -3038,7 +3050,7 @@ app.put('/api/config/:profile', requireAuth, requireRole('admin'), requireCsrf, 
           host: '127.0.0.1',
           port,
           key: GATEWAY_API_KEY,
-          cors_origins: 'https://agent2.panji.me,https://agent.panji.me',
+          cors_origins: resolveCorsOrigins(req),
         },
       };
       console.log(`[ConfigSave] Auto-injected api_server on port ${port} for ${profile}`);
@@ -4081,7 +4093,7 @@ app.post('/api/profiles/create', requireRole('admin'), requireCsrf, async (req, 
               host: '127.0.0.1',
               port,
               key: GATEWAY_API_KEY,
-              cors_origins: 'https://agent2.panji.me,https://agent.panji.me',
+              cors_origins: resolveCorsOrigins(req),
             },
           };
           fs.writeFileSync(confPath, yaml.dump(cfg, { lineWidth: 120 }));

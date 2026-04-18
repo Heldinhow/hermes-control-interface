@@ -15,7 +15,7 @@
 .chat-sidebar {
   width: 280px;
   min-width: 280px;
-  background: var(--bg-panel);
+  background: var(--bg-base);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
@@ -40,6 +40,37 @@
   flex-direction: column;
   gap: 6px;
   flex-shrink: 0;
+}
+
+.chat-sidebar-header-top {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.chat-sidebar-header-top select {
+  flex: 1;
+}
+
+/* Close button — hidden on desktop, visible on mobile */
+.chat-sidebar-close {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--fg-muted);
+  cursor: pointer;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.chat-sidebar-close:hover {
+  background: var(--bg-panel-hover);
+  color: var(--fg);
 }
 
 .chat-sidebar-list {
@@ -786,6 +817,11 @@
 
   .chat-sidebar-backdrop {
     z-index: 199;
+  }
+
+  /* Show close button inside sidebar on mobile */
+  .chat-sidebar-close {
+    display: flex;
   }
 
   .chat-input-area {

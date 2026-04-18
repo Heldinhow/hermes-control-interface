@@ -263,9 +263,12 @@ async function loadChat(container) {
     <div class="chat-layout">
       <div id="chat-sidebar" class="chat-sidebar${sidebarCollapsed}">
         <div class="chat-sidebar-header">
-          <select id="chat-profile">
-            ${profileOptions || '<option value="default">default</option>'}
-          </select>
+          <div class="chat-sidebar-header-top">
+            <select id="chat-profile">
+              ${profileOptions || '<option value="default">default</option>'}
+            </select>
+            <button class="chat-sidebar-close" onclick="toggleChatSidebar()" aria-label="Close sidebar">✕</button>
+          </div>
           <input type="text" id="chat-session-search" class="search-input" placeholder="Search sessions..." />
           <button class="btn btn-primary btn-sm" style="width:100%;margin-top:6px;" onclick="newChatSession()">+ New Chat</button>
         </div>
@@ -333,8 +336,8 @@ async function loadChat(container) {
     });
   }
 
-  // Mobile: auto-close sidebar on first load (if no saved state)
-  if (window.innerWidth <= 768 && localStorage.getItem('hci-chat-sidebar') === null) {
+  // Mobile: always start sidebar collapsed (ignore localStorage)
+  if (window.innerWidth <= 768) {
     const sidebar = document.getElementById('chat-sidebar');
     if (sidebar) sidebar.classList.add('collapsed');
     state.chatSidebarOpen = false;

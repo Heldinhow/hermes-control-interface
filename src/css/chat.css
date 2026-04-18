@@ -763,7 +763,7 @@
     left: 0;
     top: 56px;
     height: calc(100vh - 56px);
-    z-index: 100;
+    z-index: 200;
     width: 85vw;
     max-width: 360px;
     box-shadow: 4px 0 24px rgba(0, 0, 0, 0.5);
@@ -773,9 +773,19 @@
     transform: translateX(-100%);
   }
 
+  /* Z-index stack on mobile:
+   * auto = chat header/input (below sidebar when open)
+   * 199  = backdrop overlay (covers chat area)
+   * 200  = sidebar (slide-over drawer, on top of everything)
+   * When sidebar is collapsed, everything at auto z-index works fine
+   */
   .chat-header {
     position: relative;
-    z-index: 102;
+    z-index: auto;
+  }
+
+  .chat-sidebar-backdrop {
+    z-index: 199;
   }
 
   .chat-input-area {

@@ -1872,3 +1872,26 @@
   .file-editor-panel { min-height: 300px; }
   .file-editor-textarea { font-size: 14px; }
 }
+
+/* Commit Cards — Granular Update System */
+.commit-card {
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 6px;
+  background: var(--bg-card);
+  transition: border-color 0.2s;
+}
+.commit-card:hover { border-color: var(--gold); }
+.commit-hash {
+  font-size: 11px;
+  background: var(--bg-input);
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: var(--gold);
+}
+.commit-list-container {
+  max-height: 400px;
+  overflow-y: auto;
+  margin: 8px 0;
+}

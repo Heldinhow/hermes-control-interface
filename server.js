@@ -277,8 +277,21 @@ const events = [];
 // Sending a message uses --resume with the real hermes session ID
 
 // ── Gateway API Proxy (fast, structured events) ────────────────────
-const GATEWAY_API_KEY = process.env.GATEWAY_API_KEY || 'hci-gateway-2026';
+const GATEWAY_API_KEY = process.env.GATEWAY_API_KEY || loadGatewayApiKey();
 const HERMES_HOME = process.env.HERMES_HOME || path.join(os.homedir(), '.hermes');
+
+// Load gateway API key from default profile config.yaml
+function loadGatewayApiKey() {
+  try {
+    const yaml = require('js-yaml');
+    const configPath = path.join(os.homedir(), '.hermes', 'config.yaml');
+    if (fs.existsSync(configPath)) {
+      const cfg = yaml.load(fs.readFileSync(configPath, 'utf8'));
+      return cfg?.platforms?.api_server?.extra?.key || '';
+    }
+  } catch {}
+  return '';
+}
 
 // Dynamic profile → Gateway API port discovery
 // Scans ~/.hermes/config.yaml (default) + ~/.hermes/profiles/*/config.yaml
@@ -1711,7 +1724,7 @@ app.post('/api/auth/logout', requireAuth, (req, res) => {
 });
 
 // Change own password
-app.post('/api/auth/change-password', requireAuth, (req, res) => {
+app.post('/api/auth/change-password', requireAuth, requireCsrf, (req, res) => {
   const user = getCurrentUser(req);
   const { current_password, new_password } = req.body || {};
   if (!current_password || !new_password) {
@@ -1732,7 +1745,7 @@ app.get('/api/users', requireRole('admin'), (req, res) => {
 });
 
 // Create user
-app.post('/api/users', requireRole('admin'), (req, res) => {
+app.post('/api/users', requireRole('admin'), requireCsrf, (req, res) => {
   const { username, password, role, permissions } = req.body || {};
   if (!username || !password) {
     return res.status(400).json({ ok: false, error: 'Username and password required' });
@@ -1751,7 +1764,7 @@ app.post('/api/users', requireRole('admin'), (req, res) => {
 });
 
 // Update user permissions
-app.put('/api/users/:username', requireRole('admin'), (req, res) => {
+app.put('/api/users/:username', requireRole('admin'), requireCsrf, (req, res) => {
   const { role, permissions } = req.body || {};
   const userRole = ['admin', 'viewer', 'custom'].includes(role) ? role : 'viewer';
   const result = updateUserPermissions(req.params.username, userRole, userRole === 'custom' ? permissions : null);
@@ -1765,7 +1778,7 @@ app.get('/api/permissions', requireAuth, (req, res) => {
 });
 
 // Delete user
-app.delete('/api/users/:username', requireRole('admin'), (req, res) => {
+app.delete('/api/users/:username', requireRole('admin'), requireCsrf, (req, res) => {
   const currentUser = getCurrentUser(req);
   const result = deleteUser(req.params.username, currentUser.username);
   if (!result.ok) return res.status(400).json(result);
@@ -1774,7 +1787,7 @@ app.delete('/api/users/:username', requireRole('admin'), (req, res) => {
 });
 
 // Reset user password
-app.post('/api/users/:username/reset-password', requireRole('admin'), (req, res) => {
+app.post('/api/users/:username/reset-password', requireRole('admin'), requireCsrf, (req, res) => {
   const currentUser = getCurrentUser(req);
   const { new_password } = req.body || {};
   if (!new_password) {
@@ -1999,7 +2012,7 @@ app.get('/api/profiles', requireAuth, async (req, res) => {
   res.json({ ok: true, profiles });
 });
 
-app.post('/api/profiles/use', requireRole('admin'), async (req, res) => {
+app.post('/api/profiles/use', requireRole('admin'), requireCsrf, async (req, res) => {
   const name = sanitizeProfileName(req.body?.profile);
   if (!name) return res.status(400).json({ error: 'invalid profile name (allowed: a-z, A-Z, 0-9, _, -)' });
   try {
@@ -2667,7 +2680,7 @@ app.get('/api/health', (req, res) => {
 });
 
 // HCI Update — git pull + npm install + build + auto-restart
-app.post('/api/hci/update', requireRole('admin'), (req, res) => {
+app.post('/api/hci/update', requireRole('admin'), requireCsrf, (req, res) => {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -2794,7 +2807,7 @@ app.get('/api/hci/commit/:hash/diff', requireRole('admin'), async (req, res) => 
 });
 
 // HCI Update to specific commit — git checkout + npm install + build + auto-restart
-app.post('/api/hci/update/commit/:hash', requireRole('admin'), (req, res) => {
+app.post('/api/hci/update/commit/:hash', requireRole('admin'), requireCsrf, (req, res) => {
   const HCI_DIR = __dirname;
   const hash = req.params.hash.replace(/[^a-f0-9]/g, ''); // sanitize
   const run = (cmd, timeout) => shell(`bash -c "cd '${HCI_DIR}' && ${cmd}"`, timeout);
@@ -2853,7 +2866,7 @@ app.post('/api/hci/update/commit/:hash', requireRole('admin'), (req, res) => {
 });
 
 // HCI Rollback — checkout previous commit (HEAD~N)
-app.post('/api/hci/rollback', requireRole('admin'), (req, res) => {
+app.post('/api/hci/rollback', requireRole('admin'), requireCsrf, (req, res) => {
   const HCI_DIR = __dirname;
   const numSteps = req.body?.steps || 1; // how many commits back, default 1
   const run = (cmd, timeout) => shell(`bash -c "cd '${HCI_DIR}' && ${cmd}"`, timeout);
@@ -2976,7 +2989,7 @@ app.get('/api/config/:profile', requireAuth, async (req, res) => {
 });
 
 // Config update (save)
-app.put('/api/config/:profile', requireAuth, requireRole('admin'), async (req, res) => {
+app.put('/api/config/:profile', requireAuth, requireRole('admin'), requireCsrf, async (req, res) => {
   try {
     const profile = sanitizeProfileName(req.params.profile);
     if (!profile) return res.status(400).json({ ok: false, error: 'invalid profile name' });
@@ -3186,7 +3199,7 @@ app.get('/api/keys/:profile/reveal/:name', requireAuth, requireRole('admin'), as
 });
 
 // Keys — save/update key
-app.put('/api/keys/:profile', requireAuth, requireRole('admin'), async (req, res) => {
+app.put('/api/keys/:profile', requireAuth, requireRole('admin'), requireCsrf, async (req, res) => {
   try {
     const profile = sanitizeProfileName(req.params.profile);
     if (!profile) return res.status(400).json({ ok: false, error: 'invalid profile name' });
@@ -3224,7 +3237,7 @@ app.put('/api/keys/:profile', requireAuth, requireRole('admin'), async (req, res
 });
 
 // Keys — delete key
-app.delete('/api/keys/:profile/:name', requireAuth, requireRole('admin'), async (req, res) => {
+app.delete('/api/keys/:profile/:name', requireAuth, requireRole('admin'), requireCsrf, async (req, res) => {
   try {
     const profile = sanitizeProfileName(req.params.profile);
     const keyName = req.params.name;
@@ -3368,7 +3381,7 @@ app.get('/api/skills/list/:profile', requireAuth, async (req, res) => {
 });
 
 // Skills install (with profile picker)
-app.post('/api/skills/install', requireRole('admin'), async (req, res) => {
+app.post('/api/skills/install', requireRole('admin'), requireCsrf, async (req, res) => {
   try {
     const { skill, profile } = req.body || {};
     if (!skill) return res.status(400).json({ ok: false, error: 'skill name required' });
@@ -3382,7 +3395,7 @@ app.post('/api/skills/install', requireRole('admin'), async (req, res) => {
 });
 
 // Skills uninstall
-app.post('/api/skills/uninstall', requireRole('admin'), async (req, res) => {
+app.post('/api/skills/uninstall', requireRole('admin'), requireCsrf, async (req, res) => {
   try {
     const { skill, profile } = req.body || {};
     if (!skill) return res.status(400).json({ ok: false, error: 'skill name required' });
@@ -3397,7 +3410,7 @@ app.post('/api/skills/uninstall', requireRole('admin'), async (req, res) => {
 });
 
 // Skills update
-app.post('/api/skills/update', requireRole('admin'), async (req, res) => {
+app.post('/api/skills/update', requireRole('admin'), requireCsrf, async (req, res) => {
   try {
     const { skill, profile } = req.body || {};
     if (skill && !/^[\w.\-]+$/.test(skill)) return res.status(400).json({ ok: false, error: 'invalid skill name' });
@@ -3433,7 +3446,7 @@ app.post('/api/skills/check', requireAuth, async (req, res) => {
 });
 
 // Doctor
-app.post('/api/doctor', requireRole('admin'), (req, res) => {
+app.post('/api/doctor', requireRole('admin'), requireCsrf, (req, res) => {
   const fix = req.body.fix ? '--fix' : '';
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -3473,7 +3486,7 @@ function stripAnsi(str) {
   return str.replace(/\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?\x07|\r/g, '');
 }
 
-app.post('/api/backup/create', requireRole('admin'), (req, res) => {
+app.post('/api/backup/create', requireRole('admin'), requireCsrf, (req, res) => {
   // SSE response — stream hermes backup progress in real-time
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -3518,7 +3531,7 @@ app.post('/api/backup/create', requireRole('admin'), (req, res) => {
   });
 });
 
-app.post('/api/backup/import', requireRole('admin'), (req, res) => {
+app.post('/api/backup/import', requireRole('admin'), requireCsrf, (req, res) => {
   const multer = require('multer');
   const upload = multer({ dest: '/tmp/', limits: { fileSize: 5 * 1024 * 1024 * 1024 } }); // 5GB
   upload.single('backup')(req, res, (multerErr) => {
@@ -3586,7 +3599,7 @@ app.get('/api/dump', requireRole('admin'), async (req, res) => {
 });
 
 // Update
-app.post('/api/update', requireRole('admin'), (req, res) => {
+app.post('/api/update', requireRole('admin'), requireCsrf, (req, res) => {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -3640,7 +3653,7 @@ app.post('/api/update', requireRole('admin'), (req, res) => {
 });
 
 // HCI Restart — delayed restart, response sent first
-app.post('/api/hci-restart', requireRole('admin'), (req, res) => {
+app.post('/api/hci-restart', requireRole('admin'), requireCsrf, (req, res) => {
   audit(req.hciUser?.username || 'unknown', req.hciUser?.role || 'unknown', 'HCI_RESTART', 'initiated');
   res.json({ ok: true, message: 'HCI restarting in 2 seconds...' });
   // Delayed restart: let response flush, then kill and restart
@@ -3659,9 +3672,9 @@ app.post('/api/sessions/:id/rename', requireCsrf, async (req, res) => {
     const title = sanitizeTitle(req.body?.title);
     if (!title) return res.status(400).json({ ok: false, error: 'invalid title (allowed: a-z, A-Z, 0-9, spaces, basic punctuation)' });
     const profile = req.body?.profile || '';
-    const profileFlag = profile ? `-p ${sanitizeProfileName(profile)} ` : '';
-    const safeTitle = title.replace(/[^a-zA-Z0-9 _\-\.]/g, '');
-    const output = await shell(`hermes ${profileFlag}sessions rename ${sessionId} "${safeTitle}" 2>&1`);
+    const profArg = profile ? ['-p', sanitizeProfileName(profile)] : [];
+    const args = [...profArg, 'sessions', 'rename', sessionId, title];
+    const output = await execHermes(args);
     audit(req.hciUser?.username || 'unknown', req.hciUser?.role || 'unknown', 'SESSION_RENAME', `${req.params.id} → ${title}`);
     addNotification('info', `Session renamed: ${sessionId.slice(0, 12)}… → ${title}`);
     res.json({ ok: true, output });
@@ -4031,7 +4044,7 @@ app.get('/api/usage/daily/:days', requireAuth, requirePerm('usage.view'), async 
 });
 
 // Create agent (profile)
-app.post('/api/profiles/create', requireRole('admin'), async (req, res) => {
+app.post('/api/profiles/create', requireRole('admin'), requireCsrf, async (req, res) => {
   try {
     const rawName = String(req.body?.name || '').trim();
     const safeName = sanitizeProfileName(rawName);
@@ -4097,7 +4110,7 @@ app.post('/api/profiles/create', requireRole('admin'), async (req, res) => {
 });
 
 // Delete agent (profile)
-app.delete('/api/profiles/:name', requireRole('admin'), async (req, res) => {
+app.delete('/api/profiles/:name', requireRole('admin'), requireCsrf, async (req, res) => {
   try {
     const name = sanitizeProfileName(req.params.name);
     if (!name) return res.status(400).json({ ok: false, error: 'invalid profile name' });
